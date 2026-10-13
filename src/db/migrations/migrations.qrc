@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/migrations">
+        <file alias="001_initial.sql">001_initial.sql</file>
+        <file alias="002_product_types.sql">002_product_types.sql</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,44 @@
+# 构建目录
+build/
+build-*/
+
+# Qt Creator 本地配置
+*.user
+*.user.*
+
+# 运行时生成的数据库（程序运行目录下）
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# 编译产物
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake.stamp
+
+# Qt 自动生成
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*_autogen/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
