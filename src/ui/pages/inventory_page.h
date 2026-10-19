@@ -5,7 +5,7 @@
 #include <QWidget>
 
 class InventoryQueryService;
-class QDateEdit;
+class DateTimeInput;
 class QLabel;
 class QTableWidget;
 
@@ -21,7 +21,7 @@ private:
     QTableWidget *batches_=nullptr;
     QTableWidget *locations_=nullptr;
     QTableWidget *shipments_=nullptr;
-    QDateEdit *from_=nullptr;
-    QDateEdit *to_=nullptr;
+    DateTimeInput *from_=nullptr;
+    DateTimeInput *to_=nullptr;
     QLabel *error_=nullptr;
 };

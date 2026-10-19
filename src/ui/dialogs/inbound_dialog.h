@@ -7,8 +7,9 @@
 
 class InboundService;
 class MasterDataService;
+class QCheckBox;
 class QComboBox;
-class QDateTimeEdit;
+class DateTimeInput;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -25,7 +26,12 @@ public:
     bool save();
     bool isReadOnly() const;
 
+protected:
+    void showEvent(QShowEvent *event) override;
+    void changeEvent(QEvent *event) override;
+
 private:
+    void updateContentSize();
     Result<bool> loadChoices(EntityId currentProductType = 0, EntityId currentLocation = 0);
     void showError(const ServiceError &error);
     QWidget *controlForField(const QString &field) const;
@@ -34,11 +40,15 @@ private:
     InboundService &service_;
     EntityId id_ = 0;
     bool readOnly_ = false;
+    QString originalNumber_;
     QLineEdit *batchNo_ = nullptr;
+    QCheckBox *manualNumber_ = nullptr;
     QComboBox *productType_ = nullptr;
+    QLineEdit *materialModel_ = nullptr;
     QLineEdit *quantity_ = nullptr;
     QComboBox *location_ = nullptr;
-    QDateTimeEdit *businessAt_ = nullptr;
+    DateTimeInput *businessAt_ = nullptr;
+    QComboBox *receivedBy_ = nullptr;
     QTextEdit *note_ = nullptr;
     QLabel *error_ = nullptr;
     QPushButton *save_ = nullptr;

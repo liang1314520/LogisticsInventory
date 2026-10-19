@@ -1,6 +1,7 @@
 #include "repositories/document_repository.h"
 #include "repositories/inventory_repository.h"
 #include "repositories/master_data_repository.h"
+#include "services/batch_workflow_service.h"
 #include "services/inbound_service.h"
 #include "services/inventory_query_service.h"
 #include "services/logistics_service.h"
@@ -39,6 +40,7 @@ private slots:
     void locationDialogFieldsDoNotOverlap();
     void masterDataDialogsOnlyExposeRelevantFields();
     void mainWindowCreatesAllEightPages();
+    void modelDialogAndPageSupportCrud();
 private:
     std::unique_ptr<TestDatabase> db;
     std::unique_ptr<MasterDataRepository> repository;
@@ -188,10 +190,48 @@ void QueryPagesTest::masterDataDialogsOnlyExposeRelevantFields()
 void QueryPagesTest::mainWindowCreatesAllEightPages()
 {
     LogisticsService logistics(db->database(),*repository,*documents,*inventory);
-    MainWindow window(*master,*queries,*inbound,logistics);
+    BatchWorkflowService workflow(*master, *documents, *inventory, *queries);
+    MainWindow window(*master,*queries,*inbound,logistics,workflow);
     auto *pages=window.findChild<QStackedWidget *>(QStringLiteral("pages"));
     QVERIFY(qobject_cast<InventoryPage *>(pages->widget(4))); QVERIFY(qobject_cast<BatchTrackingPage *>(pages->widget(5)));
     QVERIFY(qobject_cast<ReportsPage *>(pages->widget(6))); QVERIFY(qobject_cast<MasterDataPage *>(pages->widget(7)));
+}
+
+void QueryPagesTest::modelDialogAndPageSupportCrud()
+{
+    MasterDataDialog create(*master, MasterDataDialog::Entity::ProductModel);
+    QVERIFY(create.initialize().ok());
+    auto *type = create.findChild<QComboBox *>(QStringLiteral("productTypeId"));
+    QVERIFY(type);
+    type->setCurrentIndex(type->findData(productTypeId));
+    create.findChild<QLineEdit *>(QStringLiteral("code"))->setText(QStringLiteral("F25"));
+    QVERIFY(create.save());
+    const auto all = master->allProductModelsResult();
+    QVERIFY(all.ok());
+    QCOMPARE(all.value().size(), 1);
+    MasterDataDialog edit(*master, MasterDataDialog::Entity::ProductModel);
+    QVERIFY(edit.initialize(all.value().front().id).ok());
+    edit.findChild<QLineEdit *>(QStringLiteral("code"))->setText(QStringLiteral("P25"));
+    QVERIFY(edit.save());
+    MasterDataPage page(*master);
+    auto *tabs = page.findChild<QTabWidget *>(QStringLiteral("masterDataTabs"));
+    QCOMPARE(tabs->count(), 4);
+    tabs->setCurrentIndex(3);
+    auto *models = page.findChild<QTableWidget *>(QStringLiteral("productModelsTable"));
+    QVERIFY(models);
+    QCOMPARE(models->item(0, 0)->text(), QStringLiteral("P25"));
+    QCOMPARE(models->item(0, 1)->text(), QStringLiteral("M-1"));
+    models->selectRow(0);
+    QVERIFY(QMetaObject::invokeMethod(&page, "toggleSelected"));
+    QCOMPARE(models->item(0, 3)->text(), QStringLiteral("停用"));
+    page.setConfirmationCallback([](const QString &) { return false; });
+    models->selectRow(0);
+    QVERIFY(QMetaObject::invokeMethod(&page, "deleteSelected"));
+    QCOMPARE(models->rowCount(), 1);
+    page.setConfirmationCallback([](const QString &) { return true; });
+    QVERIFY(QMetaObject::invokeMethod(&page, "deleteSelected"));
+    QCOMPARE(models->rowCount(), 0);
+    QVERIFY(master->allProductModelsResult().value().isEmpty());
 }
 
 QTEST_MAIN(QueryPagesTest)

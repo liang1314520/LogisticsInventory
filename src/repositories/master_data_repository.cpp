@@ -37,7 +37,16 @@ ProductCategory category(const QSqlQuery &q)
 {
     return {q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toBool()};
 }
+Personnel personnel(const QSqlQuery &q)
+{
+    return {q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toBool()};
+}
 ProductType productType(const QSqlQuery &q)
+{
+    return {q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toString(),
+            q.value(3).toString(), q.value(4).toBool()};
+}
+ProductModel productModel(const QSqlQuery &q)
 {
     return {q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toString(),
             q.value(3).toString(), q.value(4).toBool()};
@@ -161,6 +170,19 @@ Result<ProductType> MasterDataRepository::insertProductType(
     return productTypeById(query.lastInsertId().toLongLong());
 }
 
+Result<ProductModel> MasterDataRepository::insertProductModel(
+    EntityId productTypeId, const QString &modelCode, const QString &description)
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "INSERT INTO product_models(product_type_id,model_code,description) VALUES(?,?,?)"));
+    query.addBindValue(productTypeId);
+    query.addBindValue(modelCode);
+    query.addBindValue(description.isNull() ? QStringLiteral("") : description);
+    if (!query.exec()) return failure<ProductModel>(query, QStringLiteral("modelCode"));
+    return productModelById(query.lastInsertId().toLongLong());
+}
+
 Result<Location> MasterDataRepository::insertLocation(const QString &name, LocationType type,
                                                       bool countsAsInventory)
 {
@@ -198,6 +220,20 @@ Result<ProductType> MasterDataRepository::updateProductType(
     return productTypeById(id);
 }
 
+Result<ProductModel> MasterDataRepository::updateProductModel(
+    EntityId id, EntityId productTypeId, const QString &modelCode, const QString &description)
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "UPDATE product_models SET product_type_id=?,model_code=?,description=? WHERE id=?"));
+    query.addBindValue(productTypeId); query.addBindValue(modelCode);
+    query.addBindValue(description.isNull() ? QStringLiteral("") : description);
+    query.addBindValue(id);
+    if (!query.exec()) return failure<ProductModel>(query, QStringLiteral("modelCode"));
+    if (!query.numRowsAffected()) return missing<ProductModel>();
+    return productModelById(id);
+}
+
 Result<Location> MasterDataRepository::updateLocation(
     EntityId id, const QString &name, LocationType type, bool countsAsInventory)
 {
@@ -230,6 +266,17 @@ Result<ProductType> MasterDataRepository::productTypeById(EntityId id) const
     if (!query.exec()) return failure<ProductType>(query);
     if (!query.next()) return missing<ProductType>();
     return Result<ProductType>::success(productType(query));
+}
+
+Result<ProductModel> MasterDataRepository::productModelById(EntityId id) const
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "SELECT id,product_type_id,model_code,description,enabled FROM product_models WHERE id=?"));
+    query.addBindValue(id);
+    if (!query.exec()) return failure<ProductModel>(query);
+    if (!query.next()) return missing<ProductModel>();
+    return Result<ProductModel>::success(productModel(query));
 }
 
 Result<Location> MasterDataRepository::locationById(EntityId id) const
@@ -265,6 +312,41 @@ Result<QVector<ProductType>> MasterDataRepository::enabledProductTypes() const
     return Result<QVector<ProductType>>::success(rows);
 }
 
+// 型号可用的前提是它所属的类型和分类都启用。
+Result<QVector<ProductModel>> MasterDataRepository::enabledProductModels() const
+{
+    QSqlQuery query(database_.connection());
+    if (!query.exec(QStringLiteral(
+            "SELECT m.id,m.product_type_id,m.model_code,m.description,m.enabled "
+            "FROM product_models m JOIN product_types t ON t.id=m.product_type_id "
+            "JOIN product_categories c ON c.id=t.category_id "
+            "WHERE m.enabled=1 AND t.enabled=1 AND c.enabled=1 "
+            "ORDER BY c.name,t.type_code,m.model_code,m.id")))
+        return failure<QVector<ProductModel>>(query);
+    QVector<ProductModel> rows;
+    while (query.next()) rows.append(productModel(query));
+    if (query.lastError().isValid()) return failure<QVector<ProductModel>>(query);
+    return Result<QVector<ProductModel>>::success(rows);
+}
+
+Result<QVector<ProductModel>> MasterDataRepository::enabledProductModelsForType(
+    EntityId productTypeId) const
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "SELECT m.id,m.product_type_id,m.model_code,m.description,m.enabled "
+        "FROM product_models m JOIN product_types t ON t.id=m.product_type_id "
+        "JOIN product_categories c ON c.id=t.category_id "
+        "WHERE m.product_type_id=? AND m.enabled=1 AND t.enabled=1 AND c.enabled=1 "
+        "ORDER BY m.model_code,m.id"));
+    query.addBindValue(productTypeId);
+    if (!query.exec()) return failure<QVector<ProductModel>>(query);
+    QVector<ProductModel> rows;
+    while (query.next()) rows.append(productModel(query));
+    if (query.lastError().isValid()) return failure<QVector<ProductModel>>(query);
+    return Result<QVector<ProductModel>>::success(rows);
+}
+
 Result<QVector<Location>> MasterDataRepository::enabledLocations() const
 {
     QSqlQuery query(database_.connection());
@@ -296,6 +378,19 @@ Result<QVector<ProductType>> MasterDataRepository::allProductTypes() const
     while (query.next()) rows.append(productType(query));
     if (query.lastError().isValid()) return failure<QVector<ProductType>>(query);
     return Result<QVector<ProductType>>::success(rows);
+}
+
+Result<QVector<ProductModel>> MasterDataRepository::allProductModels() const
+{
+    QSqlQuery query(database_.connection());
+    if (!query.exec(QStringLiteral(
+            "SELECT id,product_type_id,model_code,description,enabled FROM product_models "
+            "ORDER BY product_type_id,model_code,id")))
+        return failure<QVector<ProductModel>>(query);
+    QVector<ProductModel> rows;
+    while (query.next()) rows.append(productModel(query));
+    if (query.lastError().isValid()) return failure<QVector<ProductModel>>(query);
+    return Result<QVector<ProductModel>>::success(rows);
 }
 
 Result<QVector<Location>> MasterDataRepository::allLocations() const
@@ -330,6 +425,19 @@ Result<bool> MasterDataRepository::productTypeCodeExists(
     return Result<bool>::success(query.next());
 }
 
+Result<bool> MasterDataRepository::productModelCodeExists(
+    EntityId productTypeId, const QString &modelCode, EntityId excludeId) const
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "SELECT 1 FROM product_models WHERE product_type_id=? AND model_code=? "
+        "AND (?=0 OR id<>?)"));
+    query.addBindValue(productTypeId); query.addBindValue(modelCode);
+    query.addBindValue(excludeId); query.addBindValue(excludeId);
+    if (!query.exec()) return failure<bool>(query);
+    return Result<bool>::success(query.next());
+}
+
 Result<bool> MasterDataRepository::locationNameExists(
     const QString &value, EntityId excludeId) const
 {
@@ -339,9 +447,12 @@ Result<bool> MasterDataRepository::locationNameExists(
 
 Result<bool> MasterDataRepository::setEnabled(Entity entity, EntityId id, bool enabled)
 {
+    // 顺序必须与 Entity 枚举严格一致。
     const QStringList tables = {QStringLiteral("product_categories"),
                                 QStringLiteral("product_types"),
-                                QStringLiteral("locations")};
+                                QStringLiteral("product_models"),
+                                QStringLiteral("locations"),
+                                QStringLiteral("personnel")};
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral("UPDATE %1 SET enabled=? WHERE id=?")
                       .arg(tables.at(static_cast<int>(entity))));
@@ -349,6 +460,53 @@ Result<bool> MasterDataRepository::setEnabled(Entity entity, EntityId id, bool e
     if (!query.exec()) return failure<bool>(query);
     if (!query.numRowsAffected()) return missing<bool>();
     return Result<bool>::success(true);
+}
+
+Result<Personnel> MasterDataRepository::insertPersonnel(const QString &name)
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral("INSERT INTO personnel(name) VALUES(?)"));
+    query.addBindValue(name);
+    if (!query.exec()) return failure<Personnel>(query, QStringLiteral("name"));
+    return personnelById(query.lastInsertId().toLongLong());
+}
+
+Result<Personnel> MasterDataRepository::updatePersonnel(EntityId id, const QString &name)
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral("UPDATE personnel SET name=? WHERE id=?"));
+    query.addBindValue(name);
+    query.addBindValue(id);
+    if (!query.exec()) return failure<Personnel>(query, QStringLiteral("name"));
+    if (!query.numRowsAffected()) return missing<Personnel>();
+    return personnelById(id);
+}
+
+Result<Personnel> MasterDataRepository::personnelById(EntityId id) const
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral("SELECT id,name,enabled FROM personnel WHERE id=?"));
+    query.addBindValue(id);
+    if (!query.exec()) return failure<Personnel>(query);
+    if (!query.next()) return missing<Personnel>();
+    return Result<Personnel>::success(personnel(query));
+}
+
+Result<QVector<Personnel>> MasterDataRepository::enabledPersonnel() const
+{
+    return executeList<Personnel>(database_, QStringLiteral(
+        "SELECT id,name,enabled FROM personnel WHERE enabled=1 ORDER BY name,id"), personnel);
+}
+
+Result<QVector<Personnel>> MasterDataRepository::allPersonnel() const
+{
+    return executeList<Personnel>(database_, QStringLiteral(
+        "SELECT id,name,enabled FROM personnel ORDER BY name,id"), personnel);
+}
+
+Result<bool> MasterDataRepository::personnelNameExists(const QString &name, EntityId excludeId) const
+{
+    return exists(database_, QStringLiteral("personnel"), QStringLiteral("name"), name, excludeId);
 }
 
 Result<qint64> MasterDataRepository::countCategoryReferences(EntityId id) const
@@ -364,8 +522,13 @@ Result<qint64> MasterDataRepository::countProductTypeReferences(EntityId id) con
         "SELECT COUNT(*) FROM inbound_batches WHERE product_type_id=?"), id);
 }
 
-// 只统计用户可见的业务单据（入库批次 + 物流单）。库存流水必然挂在某张单据下，
-// 计入会让提示数字虚高。
+// 型号只被物流明细引用（入库是原材料，不带型号）。
+Result<qint64> MasterDataRepository::countProductModelReferences(EntityId id) const
+{
+    return countScalar(database_, QStringLiteral(
+        "SELECT COUNT(*) FROM logistics_document_lines WHERE product_model_id=?"), id);
+}
+
 Result<qint64> MasterDataRepository::countLocationReferences(EntityId id) const
 {
     return countScalar(database_, QStringLiteral(
@@ -392,6 +555,8 @@ Result<bool> MasterDataRepository::deleteCategoryCascade(EntityId id)
                        "ON t.id=b.product_type_id WHERE t.category_id=?)"),
         QStringLiteral("DELETE FROM inbound_batches WHERE product_type_id IN "
                        "(SELECT id FROM product_types WHERE category_id=?)"),
+        QStringLiteral("DELETE FROM product_models WHERE product_type_id IN "
+                       "(SELECT id FROM product_types WHERE category_id=?)"),
         QStringLiteral("DELETE FROM product_types WHERE category_id=?")
     };
     return cascade(database_, statements,
@@ -412,10 +577,27 @@ Result<bool> MasterDataRepository::deleteProductTypeCascade(EntityId id)
                        "WHERE b.product_type_id=?)"),
         QStringLiteral("DELETE FROM inventory_entries WHERE batch_id IN "
                        "(SELECT id FROM inbound_batches WHERE product_type_id=?)"),
-        QStringLiteral("DELETE FROM inbound_batches WHERE product_type_id=?")
+        QStringLiteral("DELETE FROM inbound_batches WHERE product_type_id=?"),
+        // 类型下的型号一并清除，否则会留下无归属的孤儿型号。
+        QStringLiteral("DELETE FROM product_models WHERE product_type_id=?")
     };
     return cascade(database_, statements,
                    QStringLiteral("DELETE FROM product_types WHERE id=?"), id);
+}
+
+// 删型号时连带删除引用它的物流单据（整单），以及这些单据的全部流水。
+Result<bool> MasterDataRepository::deleteProductModelCascade(EntityId id)
+{
+    const QStringList statements{
+        QStringLiteral("DELETE FROM inventory_entries WHERE source_type='Logistics' "
+                       "AND source_id IN (SELECT document_id FROM logistics_document_lines "
+                       "WHERE product_model_id=?)"),
+        QStringLiteral("DELETE FROM logistics_documents WHERE id IN "
+                       "(SELECT document_id FROM logistics_document_lines "
+                       "WHERE product_model_id=?)")
+    };
+    return cascade(database_, statements,
+                   QStringLiteral("DELETE FROM product_models WHERE id=?"), id);
 }
 
 Result<bool> MasterDataRepository::deleteLocationCascade(EntityId id)

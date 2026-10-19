@@ -67,10 +67,10 @@ Result<QVector<AvailableBatch>> InventoryQueryService::availableBatches(EntityId
     QSqlQuery q(database_.connection());
     q.prepare(QStringLiteral(
         "SELECT b.id,b.product_type_id,b.batch_no,b.category_name_snapshot,"
-        "b.type_code_snapshot,SUM(e.quantity_delta) "
+        "b.type_code_snapshot,SUM(e.quantity_delta),b.material_model "
         "FROM inbound_batches b JOIN inventory_entries e ON e.batch_id=b.id "
         "WHERE e.location_id=? GROUP BY b.id,b.product_type_id,b.batch_no,"
-        "b.category_name_snapshot,b.type_code_snapshot HAVING SUM(e.quantity_delta)>0 "
+        "b.category_name_snapshot,b.type_code_snapshot,b.material_model HAVING SUM(e.quantity_delta)>0 "
         "ORDER BY b.batch_no,b.id"));
     q.addBindValue(locationId);
     if (!q.exec())
@@ -78,7 +78,8 @@ Result<QVector<AvailableBatch>> InventoryQueryService::availableBatches(EntityId
     QVector<AvailableBatch> rows;
     while (q.next()) {
         rows.append({q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toString(),
-                     q.value(3).toString(), q.value(4).toString(), q.value(5).toLongLong()});
+                     q.value(3).toString(), q.value(4).toString(), q.value(5).toLongLong(),
+                     q.value(6).toString()});
     }
     if (q.lastError().isValid())
         return Result<QVector<AvailableBatch>>::failure(error(q));
@@ -90,16 +91,16 @@ Result<QVector<BatchBalance>> InventoryQueryService::batchBalances() const
     QSqlQuery q(database_.connection());
     q.prepare(QStringLiteral(
         "SELECT b.id,b.batch_no,b.category_name_snapshot,b.type_code_snapshot,"
-        "SUM(e.quantity_delta) AS total_quantity FROM inbound_batches b "
+        "SUM(e.quantity_delta) AS total_quantity,b.material_model FROM inbound_batches b "
         "JOIN inventory_entries e ON e.batch_id=b.id JOIN locations l ON l.id=e.location_id "
         "AND l.counts_as_inventory=1 GROUP BY b.id,b.batch_no,b.category_name_snapshot,"
-        "b.type_code_snapshot HAVING SUM(e.quantity_delta)<>0 ORDER BY b.batch_no,b.id"));
+        "b.type_code_snapshot,b.material_model HAVING SUM(e.quantity_delta)<>0 ORDER BY b.batch_no,b.id"));
     if (!q.exec())
         return Result<QVector<BatchBalance>>::failure(error(q));
     QVector<BatchBalance> rows;
     while (q.next())
         rows.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toString(),
-                     q.value(3).toString(), q.value(4).toLongLong()});
+                     q.value(3).toString(), q.value(4).toLongLong(), q.value(5).toString()});
     if (q.lastError().isValid())
         return Result<QVector<BatchBalance>>::failure(error(q));
     return Result<QVector<BatchBalance>>::success(rows);
@@ -110,17 +111,17 @@ Result<QVector<BatchBalance>> InventoryQueryService::historicalBatches() const
     QSqlQuery q(database_.connection());
     q.prepare(QStringLiteral(
         "SELECT b.id,b.batch_no,b.category_name_snapshot,b.type_code_snapshot,"
-        "COALESCE(SUM(CASE WHEN l.counts_as_inventory=1 THEN e.quantity_delta ELSE 0 END),0) "
+        "COALESCE(SUM(CASE WHEN l.counts_as_inventory=1 THEN e.quantity_delta ELSE 0 END),0),b.material_model "
         "FROM inbound_batches b LEFT JOIN inventory_entries e ON e.batch_id=b.id "
         "LEFT JOIN locations l ON l.id=e.location_id WHERE b.status<>'Draft' "
-        "GROUP BY b.id,b.batch_no,b.category_name_snapshot,b.type_code_snapshot "
+        "GROUP BY b.id,b.batch_no,b.category_name_snapshot,b.type_code_snapshot,b.material_model "
         "ORDER BY b.batch_no,b.id"));
     if (!q.exec())
         return Result<QVector<BatchBalance>>::failure(error(q));
     QVector<BatchBalance> rows;
     while (q.next())
         rows.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toString(),
-                     q.value(3).toString(), q.value(4).toLongLong()});
+                     q.value(3).toString(), q.value(4).toLongLong(), q.value(5).toString()});
     if (q.lastError().isValid())
         return Result<QVector<BatchBalance>>::failure(error(q));
     return Result<QVector<BatchBalance>>::success(rows);
@@ -188,6 +189,10 @@ Result<QVector<BatchTimelineItem>> InventoryQueryService::batchTimeline(EntityId
         "SELECT e.id,CASE WHEN e.source_type='Inbound' THEN b.batch_no ELSE d.document_no END,"
         "CASE WHEN e.source_type='Inbound' AND e.reversal_of_entry_id IS NOT NULL THEN '入库冲销' "
         "WHEN e.source_type='Inbound' THEN '入库' "
+        "WHEN d.type='Return' AND e.location_id=d.source_location_id AND e.reversal_of_entry_id IS NULL THEN '退回发出' "
+        "WHEN d.type='Return' AND e.location_id=d.destination_location_id AND e.reversal_of_entry_id IS NULL THEN '退回接收' "
+        "WHEN d.type='Return' AND e.location_id=d.source_location_id THEN '退回发出冲销' "
+        "WHEN d.type='Return' AND e.location_id=d.destination_location_id THEN '退回接收冲销' "
         "WHEN d.type='Transfer' AND e.location_id=d.source_location_id AND e.reversal_of_entry_id IS NULL THEN '调拨发出' "
         "WHEN d.type='Transfer' AND e.location_id=d.destination_location_id AND e.reversal_of_entry_id IS NULL THEN '调拨接收' "
         "WHEN d.type='Transfer' AND e.location_id=d.source_location_id THEN '调拨发出冲销' "
@@ -198,8 +203,10 @@ Result<QVector<BatchTimelineItem>> InventoryQueryService::batchTimeline(EntityId
         "WHEN e.location_id=d.destination_location_id THEN d.destination_name_snapshot END,"
         "e.business_at,e.created_at,COALESCE(line.batch_no_snapshot,b.batch_no),"
         "COALESCE(line.category_name_snapshot,b.category_name_snapshot),"
-        "COALESCE(line.type_code_snapshot,b.type_code_snapshot) "
-        "FROM inventory_entries e LEFT JOIN inbound_batches b ON e.source_type='Inbound' AND b.id=e.source_id "
+        "COALESCE(line.type_code_snapshot,b.type_code_snapshot),line.model_code_snapshot,"
+        "CASE WHEN e.source_type='Inbound' THEN b.status ELSE d.status END,"
+        "e.reversal_of_entry_id IS NOT NULL,b.material_model "
+        "FROM inventory_entries e JOIN inbound_batches b ON b.id=e.batch_id "
         "LEFT JOIN logistics_documents d ON e.source_type='Logistics' AND d.id=e.source_id "
         "LEFT JOIN logistics_document_lines line ON line.id=e.source_line_id WHERE e.batch_id=? "
         "ORDER BY e.business_at,e.created_at,e.id"));
@@ -211,7 +218,11 @@ Result<QVector<BatchTimelineItem>> InventoryQueryService::batchTimeline(EntityId
         rows.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toString(),
                      q.value(3).toLongLong(), q.value(4).toString(), dateTime(q.value(5)),
                      dateTime(q.value(6)), q.value(7).toString(), q.value(8).toString(),
-                     q.value(9).toString()});
+                     q.value(9).toString(), q.value(10).toString(),
+                     q.value(11).toString() == QStringLiteral("Confirmed") ? DocumentStatus::Confirmed
+                         : q.value(11).toString() == QStringLiteral("Cancelled") ? DocumentStatus::Cancelled
+                                                                              : DocumentStatus::Draft,
+                     q.value(12).toBool(), q.value(13).toString()});
     }
     if (q.lastError().isValid())
         return Result<QVector<BatchTimelineItem>>::failure(error(q));
@@ -221,20 +232,46 @@ Result<QVector<BatchTimelineItem>> InventoryQueryService::batchTimeline(EntityId
 Result<QVector<ProductTypeShipment>> InventoryQueryService::productTypeShipmentSummary(
     const DateRange &range) const
 {
+    if (!range.from.isValid() || !range.to.isValid() ||
+        !range.fromTime.isValid() || !range.toTime.isValid())
+        return Result<QVector<ProductTypeShipment>>::failure({QStringLiteral("invalid_range"),
+            QStringLiteral("请选择有效的起止日期和时间"), QStringLiteral("dateRange")});
+    const QDateTime from(range.from, QTime(range.fromTime.hour(), range.fromTime.minute()));
+    const QDateTime to(range.to, QTime(range.toTime.hour(), range.toTime.minute()));
+    if (!from.isValid() || !to.isValid() || from > to)
+        return Result<QVector<ProductTypeShipment>>::failure({QStringLiteral("invalid_range"),
+            QStringLiteral("开始时间不能晚于结束时间，且必须为有效的本地时间"),
+            QStringLiteral("dateRange")});
     QSqlQuery q(database_.connection());
     q.prepare(QStringLiteral(
-        "SELECT line.category_name_snapshot,line.type_code_snapshot,SUM(line.quantity) "
-        "FROM logistics_documents d JOIN logistics_document_lines line ON line.document_id=d.id "
-        "WHERE d.type='Outbound' AND d.status='Confirmed' AND d.business_at>=? "
-        "AND d.business_at<? GROUP BY line.category_name_snapshot,line.type_code_snapshot "
-        "ORDER BY line.category_name_snapshot,line.type_code_snapshot"));
-    q.addBindValue(range.from.toString(Qt::ISODate));
-    q.addBindValue(range.to.addDays(1).toString(Qt::ISODate));
+        "WITH documents AS (SELECT d.*,CASE "
+        "WHEN substr(d.business_at,-1)='Z' OR substr(d.business_at,-6,1) IN ('+','-') "
+        "THEN julianday(d.business_at) ELSE julianday(d.business_at,'utc') END AS business_instant "
+        "FROM logistics_documents d JOIN locations source ON source.id=d.source_location_id "
+        "JOIN locations destination ON destination.id=d.destination_location_id "
+        "WHERE d.status='Confirmed' AND source.type='Factory' AND source.counts_as_inventory=1 "
+        "AND ((d.type='Outbound' AND destination.counts_as_inventory=0 "
+        "AND destination.type NOT IN ('Company','Factory')) "
+        "OR (d.type='Return' AND destination.type='Company' AND destination.counts_as_inventory=1))) "
+        "SELECT line.category_name_snapshot,line.type_code_snapshot,"
+        "SUM(CASE WHEN d.type='Outbound' THEN line.quantity ELSE 0 END),"
+        "COALESCE(line.model_code_snapshot,''),"
+        "SUM(CASE WHEN d.type='Return' THEN line.quantity ELSE 0 END),b.material_model "
+        "FROM documents d JOIN logistics_document_lines line ON line.document_id=d.id "
+        "JOIN inbound_batches b ON b.id=line.batch_id "
+        "WHERE d.business_instant>=julianday(?) AND d.business_instant<julianday(?) "
+        "GROUP BY line.category_name_snapshot,line.type_code_snapshot,"
+        "COALESCE(line.model_code_snapshot,''),b.material_model "
+        "ORDER BY line.category_name_snapshot,line.type_code_snapshot,b.material_model,"
+        "COALESCE(line.model_code_snapshot,'')"));
+    q.addBindValue(from.toUTC().toString(Qt::ISODate));
+    q.addBindValue(to.addSecs(60).toUTC().toString(Qt::ISODate));
     if (!q.exec())
         return Result<QVector<ProductTypeShipment>>::failure(error(q));
     QVector<ProductTypeShipment> rows;
     while (q.next())
-        rows.append({q.value(0).toString(), q.value(1).toString(), q.value(2).toLongLong()});
+        rows.append({q.value(0).toString(), q.value(1).toString(), q.value(2).toLongLong(),
+                     q.value(3).toString(), q.value(4).toLongLong(), q.value(5).toString()});
     if (q.lastError().isValid())
         return Result<QVector<ProductTypeShipment>>::failure(error(q));
     return Result<QVector<ProductTypeShipment>>::success(rows);
@@ -275,12 +312,28 @@ Result<DashboardSummary> InventoryQueryService::dashboardSummary(const QDate &mo
     auto outbound = scalar(database_, QStringLiteral(
                                "SELECT COALESCE(SUM(line.quantity),0) FROM logistics_documents d "
                                "JOIN logistics_document_lines line ON line.document_id=d.id "
+                               "JOIN locations source ON source.id=d.source_location_id "
+                               "JOIN locations destination ON destination.id=d.destination_location_id "
                                "WHERE d.type='Outbound' AND d.status='Confirmed' "
+                               "AND source.type='Factory' AND source.counts_as_inventory=1 "
+                               "AND destination.counts_as_inventory=0 AND destination.type NOT IN ('Company','Factory') "
                                "AND d.business_at>=? AND d.business_at<?"),
                            {from, to});
     if (!outbound.ok())
         return Result<DashboardSummary>::failure(outbound.error());
     out.monthlyOutbound = outbound.value();
+    const auto returned = scalar(database_, QStringLiteral(
+        "SELECT COALESCE(SUM(line.quantity),0) FROM logistics_documents d "
+        "JOIN logistics_document_lines line ON line.document_id=d.id "
+        "JOIN locations source ON source.id=d.source_location_id "
+        "JOIN locations destination ON destination.id=d.destination_location_id "
+        "WHERE d.type='Return' AND d.status='Confirmed' "
+        "AND source.type='Factory' AND source.counts_as_inventory=1 "
+        "AND destination.type='Company' AND destination.counts_as_inventory=1 "
+        "AND d.business_at>=? AND d.business_at<?"),
+        {from, to});
+    if (!returned.ok()) return Result<DashboardSummary>::failure(returned.error());
+    out.monthlyReturned = returned.value();
 
     QSqlQuery q(database_.connection());
     q.prepare(QStringLiteral(
@@ -288,7 +341,7 @@ Result<DashboardSummary> InventoryQueryService::dashboardSummary(const QDate &mo
         "FROM (SELECT b.batch_no source_document,'入库' business_type,b.business_at,'' source_name,"
         "b.location_name_snapshot destination_name,b.quantity quantity,b.created_at sort_created,b.id sort_id "
         "FROM inbound_batches b WHERE b.status='Confirmed' UNION ALL SELECT d.document_no,"
-        "CASE d.type WHEN 'Transfer' THEN '调拨' ELSE '出库' END,d.business_at,d.source_name_snapshot,"
+        "CASE d.type WHEN 'Transfer' THEN '调拨' WHEN 'Return' THEN '退回' ELSE '出库' END,d.business_at,d.source_name_snapshot,"
         "d.destination_name_snapshot,SUM(line.quantity),d.created_at,d.id FROM logistics_documents d "
         "JOIN logistics_document_lines line ON line.document_id=d.id WHERE d.status='Confirmed' "
         "GROUP BY d.id) ORDER BY business_at DESC,sort_created DESC,sort_id DESC LIMIT 10"));

@@ -15,12 +15,17 @@ class QPushButton;
 class MasterDataDialog final : public QDialog {
     Q_OBJECT
 public:
-    enum class Entity { Category, ProductType, Location };
+    enum class Entity { Category, ProductType, Location, ProductModel, Personnel };
     MasterDataDialog(MasterDataService &service, Entity entity, QWidget *parent = nullptr);
     Result<bool> initialize(EntityId id = 0);
     bool save();
 
+protected:
+    void showEvent(QShowEvent *event) override;
+    void changeEvent(QEvent *event) override;
+
 private:
+    void updateContentSize();
     void showError(const ServiceError &error);
     QWidget *controlForField(const QString &field) const;
 

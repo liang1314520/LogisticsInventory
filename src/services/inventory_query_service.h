@@ -6,6 +6,7 @@
 
 #include <QDate>
 #include <QDateTime>
+#include <QTime>
 #include <QVector>
 
 struct BatchBalance {
@@ -14,6 +15,7 @@ struct BatchBalance {
     QString categoryName;
     QString typeCode;
     qint64 quantity = 0;
+    QString materialModel;
 };
 
 struct AvailableBatch {
@@ -23,6 +25,7 @@ struct AvailableBatch {
     QString categoryName;
     QString typeCode;
     qint64 quantity = 0;
+    QString materialModel;
 };
 
 struct LocationBalance {
@@ -48,17 +51,26 @@ struct BatchTimelineItem {
     QString batchNo;
     QString categoryName;
     QString typeCode;
+    QString modelCode;
+    DocumentStatus documentStatus = DocumentStatus::Draft;
+    bool isReversal = false;
+    QString materialModel;
 };
 
 struct DateRange {
     QDate from;
     QDate to;
+    QTime fromTime{0, 0};
+    QTime toTime{23, 59};
 };
 
 struct ProductTypeShipment {
     QString categoryName;
     QString typeCode;
     qint64 quantity = 0;
+    QString modelCode;
+    qint64 returnedQuantity = 0; // 工厂退回公司数量，属于内部流转，不抵扣对外出库。
+    QString materialModel;
 };
 
 struct BusinessRecord {
@@ -76,6 +88,7 @@ struct DashboardSummary {
     qint64 factoryInventory = 0;
     qint64 monthlyInbound = 0;
     qint64 monthlyOutbound = 0;
+    qint64 monthlyReturned = 0;
     QVector<BusinessRecord> recentRecords;
 };
 

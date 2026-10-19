@@ -12,6 +12,7 @@ class InventoryQueryService;
 class LogisticsService;
 class MasterDataService;
 class MainWindow;
+class BatchWorkflowService;
 
 class Application final {
 public:
@@ -29,5 +30,6 @@ private:
     std::unique_ptr<InboundService> inboundService_;
     std::unique_ptr<LogisticsService> logisticsService_;
     std::unique_ptr<InventoryQueryService> queryService_;
+    std::unique_ptr<BatchWorkflowService> workflowService_;
     std::unique_ptr<MainWindow> mainWindow_;
 };

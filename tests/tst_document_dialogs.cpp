@@ -39,6 +39,7 @@ private slots:
     void sourceQueryFailureClearsStaleLineChoices();
     void deletingEarlierLineKeepsCascadeBoundToCurrentRow();
     void newLineLoadsDefaultBatch();
+    void logisticsDialogPreselectsPreferredBatch();
     void pageRequestSignalsEmitOnce();
     void logisticsCreatesAndUpdatesDraft();
     void logisticsRejectsEditingNonDrafts();
@@ -56,6 +57,7 @@ private slots:
     void pagesExposeFailuresAndClearErrorsOnSuccess();
     void logisticsPageConfirmationAndDataChanged();
     void pageConfirmationAndDataChanged();
+    void outboundModelCascadeAndZeroStockReturn();
 private:
     EntityId addLocation(const QString &name, bool inventory,
                          LocationType type = LocationType::Company);
@@ -281,6 +283,19 @@ void DocumentDialogsTest::newLineLoadsDefaultBatch()
     auto *table = dialog.findChild<QTableWidget *>(QStringLiteral("lines"));
     auto *batch = qobject_cast<QComboBox *>(table->cellWidget(0, 0));
     QCOMPARE(batch->currentData().toLongLong(), batchId);
+}
+
+void DocumentDialogsTest::logisticsDialogPreselectsPreferredBatch()
+{
+    const auto second = addConfirmedBatch(QStringLiteral("B-PREFERRED"), 100);
+    QVERIFY(second > 0);
+    LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Outbound);
+    QVERIFY(dialog.initialize(0, false, second).ok());
+    auto *lines = dialog.findChild<QTableWidget *>(QStringLiteral("lines"));
+    QVERIFY(lines);
+    auto *batch = qobject_cast<QComboBox *>(lines->cellWidget(0, 0));
+    QVERIFY(batch);
+    QCOMPARE(batch->currentData().toLongLong(), second);
 }
 
 void DocumentDialogsTest::sourceQueryFailureClearsStaleLineChoices()
@@ -646,6 +661,88 @@ void DocumentDialogsTest::pageConfirmationAndDataChanged()
     page.setConfirmationCallback([](const QString &) { return true; });
     QVERIFY(QMetaObject::invokeMethod(&page, "cancelSelected"));
     QCOMPARE(changed.count(), 1);
+}
+
+void DocumentDialogsTest::outboundModelCascadeAndZeroStockReturn()
+{
+    const auto f25 = master->createProductModel(productTypeId, QStringLiteral("F25"), {});
+    const auto p25 = master->createProductModel(productTypeId, QStringLiteral("P25"), {});
+    const auto otherType = master->createProductType(categoryId, QStringLiteral("其他类型"), {});
+    QVERIFY(f25.ok() && p25.ok() && otherType.ok());
+    const auto otherModel = master->createProductModel(otherType.value().id, QStringLiteral("MQTT"), {});
+    QVERIFY(otherModel.ok());
+    const auto second = inbound->createDraft({QStringLiteral("B-OTHER"), otherType.value().id,
+        10, sourceId, QDateTime::currentDateTime(), {}});
+    QVERIFY(second.ok());
+    QVERIFY(inbound->confirm(second.value()).ok());
+
+    LogisticsDialog outbound(*master, *queries, *logistics, DocumentType::Outbound);
+    QVERIFY(outbound.initialize().ok());
+    QVERIFY(outbound.setSourceLocation(sourceId).ok());
+    QVERIFY(outbound.addLine().ok());
+    QVERIFY(outbound.addLine().ok());
+    auto *lines = outbound.findChild<QTableWidget *>(QStringLiteral("lines"));
+    lines->removeRow(0);
+    QVERIFY(outbound.setLineBatch(0, batchId).ok());
+    auto *models = qobject_cast<QComboBox *>(lines->cellWidget(0, 2));
+    QVERIFY(models);
+    QVERIFY(models->findData(f25.value().id) >= 0);
+    QCOMPARE(models->findData(otherModel.value().id), -1);
+    QVERIFY(outbound.setLineBatch(0, second.value()).ok());
+    QCOMPARE(models->findData(f25.value().id), -1);
+    QVERIFY(models->findData(otherModel.value().id) >= 0);
+
+    LogisticsDraft draft{QStringLiteral("O-MODELS"), DocumentType::Outbound, sourceId, externalId,
+        QDateTime::currentDateTime(), {}, {{batchId, 3000000000LL, f25.value().id},
+                                         {batchId, 2000000000LL, p25.value().id}}};
+    QVERIFY(outbound.setDraft(draft).ok());
+    QCOMPARE(outbound.draft().lines.front().productModelId, f25.value().id);
+    QVERIFY(outbound.save());
+    const auto sent = logistics->list(DocumentType::Outbound);
+    QVERIFY(sent.ok());
+    QCOMPARE(sent.value().size(), 1);
+    QVERIFY(logistics->confirm(sent.value().front().id).ok());
+    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
+    QVERIFY(master->setProductModelEnabled(f25.value().id, false).ok());
+
+    LogisticsDialog returned(*master, *queries, *logistics, DocumentType::Return);
+    QVERIFY(returned.initialize().ok());
+    QVERIFY(returned.setSourceLocation(externalId).ok());
+    QCOMPARE(returned.visibleBatchIds(), QVector<EntityId>{batchId});
+    auto *destinations = returned.findChild<QComboBox *>(QStringLiteral("destinationLocationId"));
+    QVERIFY(destinations->findData(sourceId) >= 0);
+    QCOMPARE(destinations->findData(externalId), -1);
+    QVERIFY(returned.setDraft({QStringLiteral("R-MODELS"), DocumentType::Return, externalId, sourceId,
+        QDateTime::currentDateTime(), {}, {{batchId, 50, f25.value().id}}}).ok());
+    QVERIFY(returned.save());
+    const auto saved = logistics->list(DocumentType::Return);
+    QVERIFY(saved.ok());
+    QCOMPARE(saved.value().size(), 1);
+    QVERIFY(logistics->confirm(saved.value().front().id).ok());
+    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(50));
+    LogisticsDialog view(*master, *queries, *logistics, DocumentType::Return);
+    QVERIFY(view.initialize(saved.value().front().id, true).ok());
+    auto *viewLines = view.findChild<QTableWidget *>(QStringLiteral("lines"));
+    auto *viewModel = qobject_cast<QComboBox *>(viewLines->cellWidget(0, 2));
+    QVERIFY(viewModel);
+    QCOMPARE(viewModel->currentData().toLongLong(), f25.value().id);
+    QVERIFY(!viewModel->isEnabled());
+    const auto historyDraft = logistics->createDraft({QStringLiteral("O-HISTORY-MODEL"),
+        DocumentType::Outbound, sourceId, externalId, QDateTime::currentDateTime(), {},
+        {{batchId, 1, f25.value().id}}});
+    QVERIFY(historyDraft.ok());
+    LogisticsDialog edit(*master, *queries, *logistics, DocumentType::Outbound);
+    QVERIFY(edit.initialize(historyDraft.value()).ok());
+    auto *editLines = edit.findChild<QTableWidget *>(QStringLiteral("lines"));
+    auto *editModel = qobject_cast<QComboBox *>(editLines->cellWidget(0, 2));
+    QCOMPARE(editModel->currentData().toLongLong(), f25.value().id);
+    QVERIFY(editModel->currentText().contains(QStringLiteral("F25")));
+    QVERIFY(master->updateProductModel(f25.value().id, productTypeId, QStringLiteral("F25-NEW"), {}).ok());
+    QVERIFY(master->setProductModelEnabled(f25.value().id, true).ok());
+    LogisticsDialog history(*master, *queries, *logistics, DocumentType::Outbound);
+    QVERIFY(history.initialize(sent.value().front().id, true).ok());
+    auto *historyLines = history.findChild<QTableWidget *>(QStringLiteral("lines"));
+    QCOMPARE(qobject_cast<QComboBox *>(historyLines->cellWidget(0, 2))->currentText(), QStringLiteral("F25"));
 }
 
 QTEST_MAIN(DocumentDialogsTest)

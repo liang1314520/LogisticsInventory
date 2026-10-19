@@ -130,15 +130,17 @@ private slots:
     void enforcesUniqueConstraints();
     void migratesV1DataToProductTypes();
     void migrationFailureRollsBackV1();
+    void migratesV2HistoryToModelsAndRollsBackOnFailure();
 };
 
 void DatabaseTest::migratesEmptyDatabase()
 {
     TestDatabase db;
     QVERIFY(db.openAndMigrate());
-    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(2));
+    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(3));
     QCOMPARE(db.scalar("PRAGMA foreign_keys"), QVariant(1));
     QVERIFY(db.tableExists("inventory_entries"));
+    QVERIFY(db.tableExists("product_models"));
 }
 
 void DatabaseTest::createsCoreTables()
@@ -146,7 +148,7 @@ void DatabaseTest::createsCoreTables()
     TestDatabase db;
     QVERIFY(db.openAndMigrate());
     const QStringList tables = {
-        "product_categories", "product_types", "locations", "inbound_batches",
+        "product_categories", "product_types", "product_models", "locations", "inbound_batches",
         "logistics_documents", "logistics_document_lines", "inventory_entries"
     };
     for (const QString &table : tables)
@@ -325,7 +327,7 @@ void DatabaseTest::migratesV1DataToProductTypes()
     const NumericSnapshot oldDocumentQuantities = documentQuantitySnapshot(db);
 
     QVERIFY(db.migrate());
-    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(2));
+    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(3));
     QCOMPARE(db.scalar("SELECT type_code FROM product_types WHERE id=1"), QVariant("F25"));
     QCOMPARE(db.scalar("SELECT category_name_snapshot FROM inbound_batches WHERE id=1"),
              QVariant("保险箱分类"));
@@ -375,6 +377,37 @@ void DatabaseTest::migrationFailureRollsBackV1()
     QCOMPARE(documentQuantitySnapshot(db), oldDocumentQuantities);
     QCOMPARE(inventoryEntrySnapshot(db), oldInventoryEntries);
     QCOMPARE(db.scalar("SELECT COUNT(*) FROM locations"), QVariant(3));
+}
+
+void DatabaseTest::migratesV2HistoryToModelsAndRollsBackOnFailure()
+{
+    TestDatabase db;
+    QVERIFY(loadV1Fixture(db));
+    QVERIFY(db.executeResource(QStringLiteral(":/migrations/002_product_types.sql")));
+    QVERIFY(db.execute(QStringLiteral("INSERT INTO schema_migrations(version) VALUES(2)")));
+    const auto entries = inventoryEntrySnapshot(db);
+    const auto balances = balanceSnapshot(db);
+    const auto quantities = documentQuantitySnapshot(db);
+    const auto schemas = tableSchemaSnapshot(db);
+    QVERIFY(db.execute(QStringLiteral("CREATE TEMP TABLE migration3_assert(existing INTEGER)")));
+    QVERIFY(!db.migrate());
+    QCOMPARE(db.scalar(QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 2);
+    QCOMPARE(tableSchemaSnapshot(db), schemas);
+    QCOMPARE(inventoryEntrySnapshot(db), entries);
+    QVERIFY(!db.tableExists(QStringLiteral("product_models")));
+    QVERIFY(db.execute(QStringLiteral("DROP TABLE migration3_assert")));
+    QVERIFY(db.migrate());
+    QCOMPARE(inventoryEntrySnapshot(db), entries);
+    QCOMPARE(balanceSnapshot(db), balances);
+    QCOMPARE(documentQuantitySnapshot(db), quantities);
+    QCOMPARE(db.scalar(QStringLiteral("SELECT COUNT(*) FROM pragma_foreign_key_check")).toInt(), 0);
+    QCOMPARE(db.scalar(QStringLiteral("SELECT COUNT(*) FROM logistics_document_lines WHERE product_model_id IS NOT NULL")).toInt(), 0);
+    QVERIFY(db.execute(QStringLiteral("INSERT INTO product_models(id,product_type_id,model_code) VALUES(1,1,'F25'),(2,1,'P25')")));
+    QVERIFY(db.execute(QStringLiteral("INSERT INTO logistics_document_lines(document_id,batch_id,product_model_id,quantity) VALUES(1,1,1,1),(1,1,2,1)")));
+    QVERIFY(!db.execute(QStringLiteral("INSERT INTO logistics_document_lines(document_id,batch_id,product_model_id,quantity) VALUES(1,1,1,1)")));
+    QVERIFY(!db.execute(QStringLiteral("INSERT INTO logistics_document_lines(document_id,batch_id,quantity) VALUES(1,1,1)")));
+    QVERIFY(db.migrate());
+    QCOMPARE(db.scalar(QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 3);
 }
 
 QTEST_MAIN(DatabaseTest)

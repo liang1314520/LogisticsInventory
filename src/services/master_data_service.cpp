@@ -20,6 +20,13 @@ template<class T> Result<T> categoryError(const ServiceError &error)
     return Result<T>::failure({QStringLiteral("not_found"), QStringLiteral("分类不存在"),
                                QStringLiteral("categoryId")});
 }
+template<class T> Result<T> productTypeError(const ServiceError &error)
+{
+    if (error.code == QStringLiteral("database"))
+        return forwardError<T>(error);
+    return Result<T>::failure({QStringLiteral("not_found"), QStringLiteral("产品类型不存在"),
+                               QStringLiteral("productTypeId")});
+}
 }
 
 MasterDataService::MasterDataService(MasterDataRepository &repository) : repository_(repository) {}
@@ -47,11 +54,30 @@ Result<ProductType> MasterDataService::createProductType(
     return repository_.insertProductType(categoryId, code, description.trimmed());
 }
 
+Result<ProductModel> MasterDataService::createProductModel(
+    EntityId productTypeId, const QString &modelCode, const QString &description)
+{
+    const auto type = repository_.productTypeById(productTypeId);
+    if (!type.ok()) return productTypeError<ProductModel>(type.error());
+    const QString code = modelCode.trimmed();
+    if (code.isEmpty()) return Result<ProductModel>::failure(required(QStringLiteral("modelCode")));
+    const auto exists = repository_.productModelCodeExists(productTypeId, code);
+    if (!exists.ok()) return forwardError<ProductModel>(exists.error());
+    if (exists.value()) return Result<ProductModel>::failure(duplicate(QStringLiteral("modelCode")));
+    return repository_.insertProductModel(productTypeId, code, description.trimmed());
+}
+
 Result<Location> MasterDataService::createLocation(const QString &name, LocationType type,
                                                    bool countsAsInventory)
 {
     const QString value = name.trimmed();
     if (value.isEmpty()) return Result<Location>::failure(required(QStringLiteral("name")));
+    if ((type == LocationType::Company || type == LocationType::Factory) && !countsAsInventory)
+        return Result<Location>::failure({QStringLiteral("invalid"),
+            type == LocationType::Factory
+                ? QStringLiteral("工厂必须计入库存，公司发往工厂请使用调拨单")
+                : QStringLiteral("公司库位必须计入库存"),
+            QStringLiteral("countsAsInventory")});
     const auto exists = repository_.locationNameExists(value);
     if (!exists.ok()) return forwardError<Location>(exists.error());
     if (exists.value()) return Result<Location>::failure(duplicate(QStringLiteral("name")));
@@ -85,6 +111,21 @@ Result<ProductType> MasterDataService::updateProductType(
     return repository_.updateProductType(id, categoryId, code, description.trimmed());
 }
 
+Result<ProductModel> MasterDataService::updateProductModel(
+    EntityId id, EntityId productTypeId, const QString &modelCode, const QString &description)
+{
+    const auto current = repository_.productModelById(id);
+    if (!current.ok()) return forwardError<ProductModel>(current.error());
+    const auto type = repository_.productTypeById(productTypeId);
+    if (!type.ok()) return productTypeError<ProductModel>(type.error());
+    const QString code = modelCode.trimmed();
+    if (code.isEmpty()) return Result<ProductModel>::failure(required(QStringLiteral("modelCode")));
+    const auto exists = repository_.productModelCodeExists(productTypeId, code, id);
+    if (!exists.ok()) return forwardError<ProductModel>(exists.error());
+    if (exists.value()) return Result<ProductModel>::failure(duplicate(QStringLiteral("modelCode")));
+    return repository_.updateProductModel(id, productTypeId, code, description.trimmed());
+}
+
 Result<Location> MasterDataService::updateLocation(
     EntityId id, const QString &name, LocationType type, bool countsAsInventory)
 {
@@ -92,6 +133,21 @@ Result<Location> MasterDataService::updateLocation(
     if (!current.ok()) return forwardError<Location>(current.error());
     const QString value = name.trimmed();
     if (value.isEmpty()) return Result<Location>::failure(required(QStringLiteral("name")));
+    if ((type == LocationType::Company || type == LocationType::Factory) && !countsAsInventory)
+        return Result<Location>::failure({QStringLiteral("invalid"),
+            type == LocationType::Factory
+                ? QStringLiteral("工厂必须计入库存，公司发往工厂请使用调拨单")
+                : QStringLiteral("公司库位必须计入库存"),
+            QStringLiteral("countsAsInventory")});
+    if (current.value().type != type || current.value().countsAsInventory != countsAsInventory) {
+        const auto references = repository_.countLocationReferences(id);
+        if (!references.ok()) return forwardError<Location>(references.error());
+        if (references.value() > 0)
+            return Result<Location>::failure({QStringLiteral("in_use"),
+                QStringLiteral("库位已有业务记录，不能修改类型或计库存属性"),
+                current.value().type != type ? QStringLiteral("locationType")
+                                             : QStringLiteral("countsAsInventory")});
+    }
     const auto exists = repository_.locationNameExists(value, id);
     if (!exists.ok()) return forwardError<Location>(exists.error());
     if (exists.value()) return Result<Location>::failure(duplicate(QStringLiteral("name")));
@@ -106,6 +162,10 @@ Result<ProductType> MasterDataService::productTypeById(EntityId id) const
 {
     return repository_.productTypeById(id);
 }
+Result<ProductModel> MasterDataService::productModelById(EntityId id) const
+{
+    return repository_.productModelById(id);
+}
 Result<Location> MasterDataService::locationById(EntityId id) const
 {
     return repository_.locationById(id);
@@ -118,6 +178,15 @@ Result<QVector<ProductType>> MasterDataService::enabledProductTypesResult() cons
 {
     return repository_.enabledProductTypes();
 }
+Result<QVector<ProductModel>> MasterDataService::enabledProductModelsResult() const
+{
+    return repository_.enabledProductModels();
+}
+Result<QVector<ProductModel>> MasterDataService::enabledProductModelsForTypeResult(
+    EntityId productTypeId) const
+{
+    return repository_.enabledProductModelsForType(productTypeId);
+}
 Result<QVector<Location>> MasterDataService::enabledLocationsResult() const
 {
     return repository_.enabledLocations();
@@ -129,6 +198,10 @@ Result<QVector<ProductCategory>> MasterDataService::allCategoriesResult() const
 Result<QVector<ProductType>> MasterDataService::allProductTypesResult() const
 {
     return repository_.allProductTypes();
+}
+Result<QVector<ProductModel>> MasterDataService::allProductModelsResult() const
+{
+    return repository_.allProductModels();
 }
 Result<QVector<Location>> MasterDataService::allLocationsResult() const
 {
@@ -157,9 +230,53 @@ Result<bool> MasterDataService::setProductTypeEnabled(EntityId id, bool enabled)
 {
     return repository_.setEnabled(MasterDataRepository::Entity::ProductType, id, enabled);
 }
+Result<bool> MasterDataService::setProductModelEnabled(EntityId id, bool enabled)
+{
+    return repository_.setEnabled(MasterDataRepository::Entity::ProductModel, id, enabled);
+}
 Result<bool> MasterDataService::setLocationEnabled(EntityId id, bool enabled)
 {
     return repository_.setEnabled(MasterDataRepository::Entity::Location, id, enabled);
+}
+Result<Personnel> MasterDataService::createPersonnel(const QString &name)
+{
+    const QString value = name.trimmed();
+    if (value.isEmpty()) return Result<Personnel>::failure(required(QStringLiteral("name")));
+    const auto exists = repository_.personnelNameExists(value);
+    if (!exists.ok()) return forwardError<Personnel>(exists.error());
+    if (exists.value())
+        return Result<Personnel>::failure({QStringLiteral("duplicate"),
+            QStringLiteral("人员姓名已存在，同名人员可添加部门等标识区分"), QStringLiteral("name")});
+    return repository_.insertPersonnel(value);
+}
+Result<Personnel> MasterDataService::updatePersonnel(EntityId id, const QString &name)
+{
+    const auto current = repository_.personnelById(id);
+    if (!current.ok()) return forwardError<Personnel>(current.error());
+    const QString value = name.trimmed();
+    if (value.isEmpty()) return Result<Personnel>::failure(required(QStringLiteral("name")));
+    const auto exists = repository_.personnelNameExists(value, id);
+    if (!exists.ok()) return forwardError<Personnel>(exists.error());
+    if (exists.value())
+        return Result<Personnel>::failure({QStringLiteral("duplicate"),
+            QStringLiteral("人员姓名已存在，同名人员可添加部门等标识区分"), QStringLiteral("name")});
+    return repository_.updatePersonnel(id, value);
+}
+Result<Personnel> MasterDataService::personnelById(EntityId id) const
+{
+    return repository_.personnelById(id);
+}
+Result<QVector<Personnel>> MasterDataService::enabledPersonnelResult() const
+{
+    return repository_.enabledPersonnel();
+}
+Result<QVector<Personnel>> MasterDataService::allPersonnelResult() const
+{
+    return repository_.allPersonnel();
+}
+Result<bool> MasterDataService::setPersonnelEnabled(EntityId id, bool enabled)
+{
+    return repository_.setEnabled(MasterDataRepository::Entity::Personnel, id, enabled);
 }
 Result<qint64> MasterDataService::categoryReferenceCount(EntityId id) const
 {
@@ -168,6 +285,10 @@ Result<qint64> MasterDataService::categoryReferenceCount(EntityId id) const
 Result<qint64> MasterDataService::productTypeReferenceCount(EntityId id) const
 {
     return repository_.countProductTypeReferences(id);
+}
+Result<qint64> MasterDataService::productModelReferenceCount(EntityId id) const
+{
+    return repository_.countProductModelReferences(id);
 }
 Result<qint64> MasterDataService::locationReferenceCount(EntityId id) const
 {
@@ -180,6 +301,10 @@ Result<bool> MasterDataService::deleteCategory(EntityId id)
 Result<bool> MasterDataService::deleteProductType(EntityId id)
 {
     return repository_.deleteProductTypeCascade(id);
+}
+Result<bool> MasterDataService::deleteProductModel(EntityId id)
+{
+    return repository_.deleteProductModelCascade(id);
 }
 Result<bool> MasterDataService::deleteLocation(EntityId id)
 {

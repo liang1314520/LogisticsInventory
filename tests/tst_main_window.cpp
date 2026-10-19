@@ -5,29 +5,49 @@
 #include "services/inventory_query_service.h"
 #include "services/logistics_service.h"
 #include "services/master_data_service.h"
+#include "services/batch_workflow_service.h"
 #include "test_support.h"
 #include "ui/main_window.h"
 #include "ui/pages/dashboard_page.h"
+#include "ui/pages/batch_tracking_page.h"
 #include "ui/pages/inbound_page.h"
+#include "ui/pages/master_data_page.h"
+#include "ui/dialogs/logistics_dialog.h"
 #include "ui/pages/logistics_page.h"
+#include "ui/widgets/workflow_bar.h"
 
+#include <QComboBox>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QStackedWidget>
 #include <QTableWidget>
+#include <QTimer>
 #include <QtTest>
 
 class MainWindowTest : public QObject {
     Q_OBJECT
 private slots:
     void init();
-    void navigationHasEightEntriesAndSwitchesPages();
+    void navigationHasNineEntriesAndSwitchesPages();
     void setPageOnlyReplacesPlaceholdersAndKeepsOwnership();
     void dashboardAndInboundPageReflectDocumentsAndActions();
     void transferAndOutboundPagesFilterSortAndMutate();
     void successfulMutationRefreshesDashboardAndCurrentPage();
+    void workflowBarIsAlwaysVisible();
+    void selectingBatchUpdatesWorkflowBar();
+    void mutationRefreshesWorkflowState();
+    void nextActionNavigatesToExpectedPage();
+    void inboundPageSelectsWorkflowBatch();
+    void logisticsPageSelectsWorkflowBatch();
+    void outboundCreateShowsInboundPrerequisite();
+    void returnPageShowsNoReturnableQuantity();
+    void historyViewRemainsAvailableWhenWorkflowBlocksNewAction();
+    void workflowContextAppearsOnTrackingAndMasterDataPages();
+    void trackingPageKeepsSelectedWorkflowBatch();
+    void logisticsSelectsBatchFromAnyDocumentLine();
+    void deletingCurrentDraftClearsWorkflowContext();
 private:
     std::unique_ptr<TestDatabase> db;
     std::unique_ptr<MasterDataRepository> masterRepository;
@@ -40,6 +60,7 @@ private:
     std::unique_ptr<MainWindow> window;
     EntityId productTypeId = 0;
     EntityId locationId = 0;
+    std::unique_ptr<BatchWorkflowService> workflow;
 };
 
 void MainWindowTest::init()
@@ -53,26 +74,32 @@ void MainWindowTest::init()
     inbound = std::make_unique<InboundService>(db->database(), *masterRepository, *documents, *inventory);
     logistics = std::make_unique<LogisticsService>(db->database(), *masterRepository, *documents, *inventory);
     queries = std::make_unique<InventoryQueryService>(db->database());
+    workflow = std::make_unique<BatchWorkflowService>(*masterService, *documents,
+                                                       *inventory, *queries);
     const auto category = masterService->createCategory(QStringLiteral("设备"));
     QVERIFY(category.ok());
     const auto productType = masterService->createProductType(category.value().id, QStringLiteral("GW-1"), {});
     QVERIFY(productType.ok()); productTypeId = productType.value().id;
     const auto location = masterService->createLocation(QStringLiteral("公司仓"), LocationType::Company, true);
     QVERIFY(location.ok()); locationId = location.value().id;
-    window = std::make_unique<MainWindow>(*masterService, *queries, *inbound, *logistics);
+    window = std::make_unique<MainWindow>(*masterService, *queries, *inbound, *logistics,
+                                           *workflow);
     window->findChild<InboundPage *>(QStringLiteral("inboundPage"))->setConfirmationCallback([](const QString &) { return true; });
     window->findChild<LogisticsPage *>(QStringLiteral("transferPage"))->setConfirmationCallback([](const QString &) { return true; });
     window->findChild<LogisticsPage *>(QStringLiteral("outboundPage"))->setConfirmationCallback([](const QString &) { return true; });
 }
 
-void MainWindowTest::navigationHasEightEntriesAndSwitchesPages()
+void MainWindowTest::navigationHasNineEntriesAndSwitchesPages()
 {
     auto *navigation = window->findChild<QListWidget *>(QStringLiteral("navigation"));
     auto *pages = window->findChild<QStackedWidget *>(QStringLiteral("pages"));
     QVERIFY(navigation); QVERIFY(pages);
-    QCOMPARE(navigation->count(), 8); QCOMPARE(pages->count(), 8);
+    QCOMPARE(navigation->count(), 9); QCOMPARE(pages->count(), 9);
     QCOMPARE(navigation->item(0)->text(), QStringLiteral("工作台"));
     QCOMPARE(navigation->item(7)->text(), QStringLiteral("基础资料"));
+    QCOMPARE(navigation->item(8)->text(), QStringLiteral("退回管理"));
+    navigation->setCurrentRow(8);
+    QCOMPARE(pages->currentWidget()->objectName(), QStringLiteral("returnPage"));
     navigation->setCurrentRow(3);
     QCOMPARE(pages->currentIndex(), 3);
 }
@@ -203,6 +230,268 @@ void MainWindowTest::successfulMutationRefreshesDashboardAndCurrentPage()
     QCOMPARE(dashboard->findChild<QLabel *>(QStringLiteral("totalInventory"))->text(), QStringLiteral("0"));
     table->selectRow(cancelledRow); QVERIFY(QMetaObject::invokeMethod(page, "copySelected"));
     QCOMPARE(changed.count(), 2); QCOMPARE(table->rowCount(), 2);
+}
+
+void MainWindowTest::workflowBarIsAlwaysVisible()
+{
+    auto *bar = window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"));
+    QVERIFY(bar);
+    QVERIFY(bar->findChild<QComboBox *>(QStringLiteral("workflowBatchSelector")));
+    QVERIFY(bar->findChild<QTableWidget *>(QStringLiteral("workflowSteps")));
+}
+
+void MainWindowTest::selectingBatchUpdatesWorkflowBar()
+{
+    const auto created = inbound->createDraft({QStringLiteral("B-WORKFLOW"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(created.ok());
+    QVERIFY(inbound->confirm(created.value()).ok());
+    auto *bar = window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"));
+    QVERIFY(bar);
+    QVERIFY(bar->refresh().ok());
+    auto *selector = bar->findChild<QComboBox *>(QStringLiteral("workflowBatchSelector"));
+    QVERIFY(selector);
+    selector->setCurrentIndex(selector->findData(created.value()));
+    QCoreApplication::processEvents();
+    QCOMPARE(window->currentBatchId(), created.value());
+    QCOMPARE(bar->currentBatchId(), created.value());
+}
+
+void MainWindowTest::mutationRefreshesWorkflowState()
+{
+    const auto created = inbound->createDraft({QStringLiteral("B-MUTATION"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(created.ok());
+    window->setCurrentBatch(created.value());
+    auto *bar = window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"));
+    QVERIFY(bar);
+    QVERIFY(bar->refresh().ok());
+    QVERIFY(inbound->confirm(created.value()).ok());
+    QVERIFY(QMetaObject::invokeMethod(window.get(), "refreshAfterMutation"));
+    QVERIFY(bar->findChild<QLabel *>(QStringLiteral("workflowStatusLabel"))->text()
+                .contains(QStringLiteral("进行中")));
+    QVERIFY(bar->findChild<QLabel *>(QStringLiteral("workflowMessageLabel"))->text()
+                .contains(QStringLiteral("可直接出库")));
+    auto *page = window->findChild<InboundPage *>(QStringLiteral("inboundPage"));
+    QVERIFY(!page->findChild<QLabel *>(QStringLiteral("workflowContext"))->text()
+                 .contains(QStringLiteral("先确认入库")));
+}
+
+void MainWindowTest::nextActionNavigatesToExpectedPage()
+{
+    const auto created = inbound->createDraft({QStringLiteral("B-NEXT"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(created.ok());
+    QVERIFY(inbound->confirm(created.value()).ok());
+    window->setCurrentBatch(created.value());
+    auto *bar = window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"));
+    QVERIFY(bar);
+    QVERIFY(bar->refresh().ok());
+    auto *next = bar->findChild<QPushButton *>(QStringLiteral("workflowNextButton"));
+    QVERIFY(next->isEnabled());
+    next->click();
+    auto *pages = window->findChild<QStackedWidget *>(QStringLiteral("pages"));
+    QCOMPARE(pages->currentIndex(), 3);
+}
+
+void MainWindowTest::inboundPageSelectsWorkflowBatch()
+{
+    const auto first = inbound->createDraft({QStringLiteral("B-SELECT"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    const auto second = inbound->createDraft({QStringLiteral("B-OTHER"), productTypeId, 9,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(first.ok() && second.ok());
+    window->setCurrentBatch(first.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(1);
+    auto *page = window->findChild<InboundPage *>(QStringLiteral("inboundPage"));
+    auto *table = page->findChild<QTableWidget *>(QStringLiteral("documents"));
+    QVERIFY(table->currentRow() >= 0);
+    QCOMPARE(table->item(table->currentRow(), 0)->text().toLongLong(), first.value());
+    auto *context = page->findChild<QLabel *>(QStringLiteral("workflowContext"));
+    QVERIFY(context);
+    QVERIFY(context->text().contains(QStringLiteral("步骤 02 / 06")));
+    QVERIFY(context->text().contains(QStringLiteral("先确认入库")));
+    for (int row = 0; row < table->rowCount(); ++row) {
+        if (table->item(row, 0)->text().toLongLong() == second.value())
+            table->selectRow(row);
+    }
+    QCOMPARE(window->currentBatchId(), second.value());
+}
+
+void MainWindowTest::logisticsPageSelectsWorkflowBatch()
+{
+    const auto batch = inbound->createDraft({QStringLiteral("B-LOGISTICS"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(batch.ok());
+    QVERIFY(inbound->confirm(batch.value()).ok());
+    const auto target = masterService->createLocation(QStringLiteral("工厂"), LocationType::Factory, true);
+    QVERIFY(target.ok());
+    const auto draft = logistics->createDraft({QStringLiteral("T-SELECT"), DocumentType::Transfer,
+        locationId, target.value().id, QDateTime::currentDateTime().addSecs(-60), {}, {{batch.value(), 2}}});
+    const auto history = logistics->createDraft({QStringLiteral("T-HISTORY"), DocumentType::Transfer,
+        locationId, target.value().id, QDateTime::currentDateTime(), {}, {{batch.value(), 1}}});
+    QVERIFY(draft.ok() && history.ok());
+    QVERIFY(logistics->confirm(history.value()).ok());
+    window->setCurrentBatch(batch.value());
+    window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"))
+        ->findChild<QPushButton *>(QStringLiteral("workflowNextButton"))->click();
+    auto *page = window->findChild<LogisticsPage *>(QStringLiteral("transferPage"));
+    auto *table = page->findChild<QTableWidget *>(QStringLiteral("documents"));
+    QCOMPARE(window->findChild<QStackedWidget *>(QStringLiteral("pages"))->currentIndex(), 2);
+    QVERIFY(table->currentRow() >= 0);
+    QCOMPARE(table->item(table->currentRow(), 0)->text().toLongLong(), draft.value());
+    QVERIFY(page->findChild<QPushButton *>(QStringLiteral("editButton"))->isEnabled());
+}
+
+void MainWindowTest::outboundCreateShowsInboundPrerequisite()
+{
+    const auto batch = inbound->createDraft({QStringLiteral("B-BLOCKED"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(batch.ok());
+    window->setCurrentBatch(batch.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(3);
+    auto *page = window->findChild<LogisticsPage *>(QStringLiteral("outboundPage"));
+    QTimer::singleShot(0, page, [page] {
+        if (auto *dialog = page->findChild<LogisticsDialog *>()) dialog->reject();
+    });
+    const auto result = page->openCreateDialog();
+    QVERIFY(!result.ok());
+    QVERIFY(result.error().message.contains(QStringLiteral("先确认入库")));
+    QCOMPARE(page->findChild<QLabel *>(QStringLiteral("errorLabel"))->text(), result.error().message);
+    const auto listed = logistics->list(DocumentType::Outbound);
+    QVERIFY(listed.ok());
+    QVERIFY(listed.value().isEmpty());
+}
+
+void MainWindowTest::returnPageShowsNoReturnableQuantity()
+{
+    const auto batch = inbound->createDraft({QStringLiteral("B-NO-RETURN"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(batch.ok());
+    QVERIFY(inbound->confirm(batch.value()).ok());
+    window->setCurrentBatch(batch.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(8);
+    auto *page = window->findChild<LogisticsPage *>(QStringLiteral("returnPage"));
+    QTimer::singleShot(0, page, [page] {
+        if (auto *dialog = page->findChild<LogisticsDialog *>()) dialog->reject();
+    });
+    const auto result = page->openCreateDialog();
+    QVERIFY(!result.ok());
+    QVERIFY(result.error().message.contains(QStringLiteral("可退")));
+}
+
+void MainWindowTest::historyViewRemainsAvailableWhenWorkflowBlocksNewAction()
+{
+    const auto batch = inbound->createDraft({QStringLiteral("B-HISTORY"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    const auto customer = masterService->createLocation(QStringLiteral("客户"), LocationType::Customer, false);
+    QVERIFY(batch.ok() && customer.ok());
+    QVERIFY(inbound->confirm(batch.value()).ok());
+    const auto outbound = logistics->createDraft({QStringLiteral("O-HISTORY"), DocumentType::Outbound,
+        locationId, customer.value().id, QDateTime::currentDateTime(), {}, {{batch.value(), 12}}});
+    QVERIFY(outbound.ok());
+    QVERIFY(logistics->confirm(outbound.value()).ok());
+    window->setCurrentBatch(batch.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(3);
+    auto *page = window->findChild<LogisticsPage *>(QStringLiteral("outboundPage"));
+    QTimer::singleShot(0, page, [page] {
+        if (auto *dialog = page->findChild<LogisticsDialog *>()) dialog->reject();
+    });
+    QVERIFY(!page->openCreateDialog().ok());
+    QVERIFY(page->findChild<QPushButton *>(QStringLiteral("viewButton"))->isEnabled());
+    bool viewed = false;
+    QTimer::singleShot(0, page, [page, &viewed] {
+        if (auto *dialog = page->findChild<LogisticsDialog *>()) {
+            viewed = dialog->isReadOnly();
+            dialog->reject();
+        }
+    });
+    QVERIFY(page->openViewDialog(outbound.value()).ok());
+    QVERIFY(viewed);
+    window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"))
+        ->findChild<QPushButton *>(QStringLiteral("workflowTrackingButton"))->click();
+    auto *tracking = window->findChild<BatchTrackingPage *>(QStringLiteral("batchTrackingPage"));
+    QCOMPARE(window->findChild<QStackedWidget *>(QStringLiteral("pages"))->currentIndex(), 5);
+    QCOMPARE(tracking->findChild<QComboBox *>(QStringLiteral("batchSelector"))->currentData().toLongLong(), batch.value());
+    QCOMPARE(tracking->findChild<QTableWidget *>(QStringLiteral("timeline"))->rowCount(), 2);
+}
+
+void MainWindowTest::workflowContextAppearsOnTrackingAndMasterDataPages()
+{
+    const auto batch = inbound->createDraft({QStringLiteral("B-CONTEXT"), productTypeId, 12,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(batch.ok());
+    QVERIFY(inbound->confirm(batch.value()).ok());
+    window->setCurrentBatch(batch.value());
+    auto *navigation = window->findChild<QListWidget *>(QStringLiteral("navigation"));
+    navigation->setCurrentRow(5);
+    auto *tracking = window->findChild<BatchTrackingPage *>(QStringLiteral("batchTrackingPage"));
+    auto *trackingContext = tracking->findChild<QLabel *>(QStringLiteral("workflowContext"));
+    QVERIFY(trackingContext);
+    QVERIFY(trackingContext->text().contains(QStringLiteral("步骤 06 / 06")));
+    navigation->setCurrentRow(7);
+    auto *masterPage = window->findChild<MasterDataPage *>(QStringLiteral("masterDataPage"));
+    auto *masterContext = masterPage->findChild<QLabel *>(QStringLiteral("workflowContext"));
+    QVERIFY(masterContext);
+    QVERIFY(masterContext->text().contains(QStringLiteral("步骤 01 / 06")));
+}
+
+void MainWindowTest::trackingPageKeepsSelectedWorkflowBatch()
+{
+    const auto first = inbound->createDraft({QStringLiteral("B-TRACK-1"), productTypeId, 5,
+        locationId, QDateTime::currentDateTime(), {}});
+    const auto second = inbound->createDraft({QStringLiteral("B-TRACK-2"), productTypeId, 7,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(first.ok() && second.ok());
+    QVERIFY(inbound->confirm(first.value()).ok());
+    QVERIFY(inbound->confirm(second.value()).ok());
+    window->setCurrentBatch(second.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(5);
+    auto *tracking = window->findChild<BatchTrackingPage *>(QStringLiteral("batchTrackingPage"));
+    QCOMPARE(tracking->findChild<QComboBox *>(QStringLiteral("batchSelector"))->currentData().toLongLong(), second.value());
+    QCOMPARE(window->currentBatchId(), second.value());
+}
+
+void MainWindowTest::logisticsSelectsBatchFromAnyDocumentLine()
+{
+    const auto first = inbound->createDraft({QStringLiteral("B-MULTI-1"), productTypeId, 5,
+        locationId, QDateTime::currentDateTime(), {}});
+    const auto second = inbound->createDraft({QStringLiteral("B-MULTI-2"), productTypeId, 7,
+        locationId, QDateTime::currentDateTime(), {}});
+    const auto customer = masterService->createLocation(QStringLiteral("客户"), LocationType::Customer, false);
+    QVERIFY(first.ok() && second.ok() && customer.ok());
+    QVERIFY(inbound->confirm(first.value()).ok());
+    QVERIFY(inbound->confirm(second.value()).ok());
+    const auto draft = logistics->createDraft({QStringLiteral("O-MULTI"), DocumentType::Outbound,
+        locationId, customer.value().id, QDateTime::currentDateTime(), {},
+        {{first.value(), 2}, {second.value(), 3}}});
+    QVERIFY(draft.ok());
+    window->setCurrentBatch(second.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(3);
+    auto *page = window->findChild<LogisticsPage *>(QStringLiteral("outboundPage"));
+    auto *table = page->findChild<QTableWidget *>(QStringLiteral("documents"));
+    QVERIFY(table->currentRow() >= 0);
+    QCOMPARE(table->item(table->currentRow(), 0)->text().toLongLong(), draft.value());
+    table->clearSelection();
+    table->selectRow(0);
+    QCOMPARE(window->currentBatchId(), second.value());
+    QVERIFY(page->findChild<QLabel *>(QStringLiteral("errorLabel"))->text().isEmpty());
+}
+
+void MainWindowTest::deletingCurrentDraftClearsWorkflowContext()
+{
+    const auto batch = inbound->createDraft({QStringLiteral("B-DELETE"), productTypeId, 5,
+        locationId, QDateTime::currentDateTime(), {}});
+    QVERIFY(batch.ok());
+    window->setCurrentBatch(batch.value());
+    window->findChild<QListWidget *>(QStringLiteral("navigation"))->setCurrentRow(1);
+    auto *page = window->findChild<InboundPage *>(QStringLiteral("inboundPage"));
+    QVERIFY(QMetaObject::invokeMethod(page, "deleteSelected"));
+    auto *bar = window->findChild<WorkflowBar *>(QStringLiteral("workflowBar"));
+    QCOMPARE(window->currentBatchId(), EntityId(0));
+    QCOMPARE(bar->currentBatchId(), EntityId(0));
+    QVERIFY(!bar->findChild<QPushButton *>(QStringLiteral("workflowTrackingButton"))->isEnabled());
+    QVERIFY(page->findChild<QLabel *>(QStringLiteral("errorLabel"))->text().isEmpty());
 }
 
 QTEST_MAIN(MainWindowTest)

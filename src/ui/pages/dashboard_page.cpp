@@ -1,6 +1,7 @@
 #include "dashboard_page.h"
 
 #include "services/inventory_query_service.h"
+#include "ui/widgets/layout_utils.h"
 
 #include <QDate>
 #include <QFormLayout>
@@ -24,7 +25,8 @@ DashboardPage::DashboardPage(InventoryQueryService &service, QWidget *parent)
     company_ = addValue(QStringLiteral("公司库存"), QStringLiteral("companyInventory"));
     factory_ = addValue(QStringLiteral("工厂库存"), QStringLiteral("factoryInventory"));
     inbound_ = addValue(QStringLiteral("本月入库"), QStringLiteral("monthlyInbound"));
-    outbound_ = addValue(QStringLiteral("本月出库"), QStringLiteral("monthlyOutbound"));
+    outbound_ = addValue(QStringLiteral("本月对外出库"), QStringLiteral("monthlyOutbound"));
+    returned_ = addValue(QStringLiteral("本月工厂退回（内部流转）"), QStringLiteral("monthlyReturned"));
     layout->addLayout(summary);
     recent_ = new QTableWidget(0, 6, this);
     recent_->setObjectName(QStringLiteral("recentRecords"));
@@ -45,6 +47,7 @@ Result<bool> DashboardPage::refresh()
     factory_->setText(QString::number(value.factoryInventory));
     inbound_->setText(QString::number(value.monthlyInbound));
     outbound_->setText(QString::number(value.monthlyOutbound));
+    returned_->setText(QString::number(value.monthlyReturned));
     recent_->clearContents();
     recent_->setRowCount(static_cast<int>(value.recentRecords.size()));
     for (int row = 0; row < value.recentRecords.size(); ++row) {
@@ -55,6 +58,7 @@ Result<bool> DashboardPage::refresh()
         for (int column = 0; column < cells.size(); ++column)
             recent_->setItem(row, column, new QTableWidgetItem(cells.at(column)));
     }
+    LayoutUtils::fitTableColumns(recent_);
     return Result<bool>::success(true);
 }
 

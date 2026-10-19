@@ -38,40 +38,63 @@ InboundService::InboundService(Database &database, MasterDataRepository &masterD
 {
 }
 
-ServiceError InboundService::validateDraft(const InboundDraft &draft) const
+ServiceError InboundService::validateDraft(const InboundDraft &draft, bool requireNumber) const
 {
-    if (draft.batchNo.trimmed().isEmpty())
+    if (requireNumber && draft.batchNo.trimmed().isEmpty())
         return required(QStringLiteral("batchNo"));
     if (draft.productTypeId <= 0)
         return invalid(QStringLiteral("productTypeId"));
+    if (draft.materialModel.trimmed().isEmpty())
+        return {QStringLiteral("required"), QStringLiteral("请填写物料型号（例如 V40）"),
+                QStringLiteral("materialModel")};
     if (draft.quantity <= 0)
         return invalid(QStringLiteral("quantity"));
     if (draft.initialLocationId <= 0)
         return invalid(QStringLiteral("initialLocationId"));
     if (!draft.businessAt.isValid())
         return invalid(QStringLiteral("businessAt"));
+    if (draft.receivedById < 0)
+        return invalid(QStringLiteral("receivedById"));
+    if (draft.receivedById > 0) {
+        const auto person = masterData_.personnelById(draft.receivedById);
+        if (!person.ok())
+            return {person.error().code, person.error().message, QStringLiteral("receivedById")};
+        if (!person.value().enabled)
+            return {QStringLiteral("invalid_master_data"),
+                QStringLiteral("入库签收人已停用，请编辑草稿重新选择"), QStringLiteral("receivedById")};
+    }
+    const auto location = masterData_.locationById(draft.initialLocationId);
+    if (!location.ok())
+        return {location.error().code, location.error().message, QStringLiteral("initialLocationId")};
+    if (!location.value().enabled || location.value().type != LocationType::Company ||
+        !location.value().countsAsInventory)
+        return {QStringLiteral("invalid_master_data"),
+                QStringLiteral("新物料必须先入库到已启用且计库存的公司库位"),
+                QStringLiteral("initialLocationId")};
     return {};
 }
 
 Result<EntityId> InboundService::createDraft(const InboundDraft &draft)
 {
-    const ServiceError error = validateDraft(draft);
+    const ServiceError error = validateDraft(draft, false);
     if (!error.code.isEmpty())
         return Result<EntityId>::failure(error);
     InboundDraft normalized = draft;
     normalized.batchNo = draft.batchNo.trimmed();
     normalized.note = draft.note.trimmed();
+    normalized.materialModel = draft.materialModel.trimmed();
     return documents_.insertInboundDraft(normalized);
 }
 
 Result<bool> InboundService::updateDraft(EntityId id, const InboundDraft &draft)
 {
-    const ServiceError error = validateDraft(draft);
+    const ServiceError error = validateDraft(draft, false);
     if (!error.code.isEmpty())
         return Result<bool>::failure(error);
     InboundDraft normalized = draft;
     normalized.batchNo = draft.batchNo.trimmed();
     normalized.note = draft.note.trimmed();
+    normalized.materialModel = draft.materialModel.trimmed();
     return documents_.updateInboundDraft(id, normalized);
 }
 
@@ -98,6 +121,16 @@ Result<bool> InboundService::confirm(EntityId id)
         const ServiceError draftError = validateDraft(batch);
         if (!draftError.code.isEmpty()) {
             operationError = draftError;
+            return false;
+        }
+        if (batch.receivedById == 0) {
+            operationError = {QStringLiteral("required"),
+                QStringLiteral("请先编辑草稿选择入库签收人，再确认入库"), QStringLiteral("receivedById")};
+            return false;
+        }
+        const auto person = masterData_.personnelById(batch.receivedById);
+        if (!person.ok()) {
+            operationError = {person.error().code, person.error().message, QStringLiteral("receivedById")};
             return false;
         }
         const auto productType = masterData_.productTypeById(batch.productTypeId);
@@ -127,7 +160,7 @@ Result<bool> InboundService::confirm(EntityId id)
         }
         const auto confirmed = documents_.confirmInbound(
             batch.id, category.value().name, productType.value().typeCode,
-            location.value().name, QDateTime::currentDateTimeUtc());
+            location.value().name, QDateTime::currentDateTimeUtc(), person.value().name);
         if (!confirmed.ok()) {
             operationError = confirmed.error();
             return false;
@@ -160,7 +193,12 @@ Result<EntityId> InboundService::copyToDraft(EntityId id)
         return Result<EntityId>::failure(invalidStatus());
     InboundDraft copy = source.value();
     copy.batchNo.clear();
-    return documents_.insertInboundDraft(copy);
+    copy.receivedById = 0;
+    if (copy.materialModel.trimmed().isEmpty())
+        return Result<EntityId>::failure({QStringLiteral("required"),
+            QStringLiteral("原批次缺少物料型号，请新建入库并填写"),
+            QStringLiteral("materialModel")});
+    return createDraft(copy);
 }
 
 Result<bool> InboundService::cancel(EntityId id)

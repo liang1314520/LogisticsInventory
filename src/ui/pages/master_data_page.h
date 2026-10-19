@@ -20,6 +20,9 @@ public:
 
     void setConfirmationCallback(std::function<bool(const QString &)> callback);
 
+signals:
+    void dataChanged();
+
 private slots:
     void addSelectedType();
     void editSelected();
@@ -36,7 +39,9 @@ private:
     QTabWidget *tabs_ = nullptr;
     QTableWidget *categories_ = nullptr;
     QTableWidget *productTypes_ = nullptr;
+    QTableWidget *productModels_ = nullptr;
     QTableWidget *locations_ = nullptr;
+    QTableWidget *personnel_ = nullptr;
     QLabel *error_ = nullptr;
     QPushButton *toggle_ = nullptr;
     std::function<bool(const QString &)> confirmation_;

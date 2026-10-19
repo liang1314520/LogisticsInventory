@@ -16,6 +16,7 @@ public:
     Result<bool> cancel(EntityId id);
     Result<EntityId> copyToDraft(EntityId id);
     Result<QVector<LogisticsDocument>> list(DocumentType type) const;
+    Result<QVector<ReturnableLine>> returnableLines(EntityId factoryLocationId) const;
     Result<bool> deleteDraft(EntityId id);
 
 private:

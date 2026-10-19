@@ -1,9 +1,12 @@
 #include "document_repository.h"
 
-#include <QMetaType>
+#include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVariant>
+
+#include <algorithm>
+#include <limits>
 
 namespace {
 ServiceError databaseError(const QSqlQuery &query)
@@ -28,24 +31,23 @@ DocumentStatus statusFromText(const QString &text)
 
 QString typeText(DocumentType type)
 {
+    if (type == DocumentType::Return)
+        return QStringLiteral("Return");
     return type == DocumentType::Transfer ? QStringLiteral("Transfer")
                                           : QStringLiteral("Outbound");
 }
 
-QVariant nullableDocumentNumber(const QString &documentNo)
+QString numberPrefix(DocumentType type)
 {
-    return documentNo.isEmpty() ? QVariant(QMetaType::fromType<QString>())
-                                : QVariant(documentNo);
-}
-
-QVariant nullableBatchNumber(const QString &batchNo)
-{
-    return batchNo.isEmpty() ? QVariant(QMetaType::fromType<QString>())
-                             : QVariant(batchNo);
+    if (type == DocumentType::Return)
+        return QStringLiteral("TH");
+    return type == DocumentType::Transfer ? QStringLiteral("DB") : QStringLiteral("CK");
 }
 
 DocumentType typeFromText(const QString &text)
 {
+    if (text == QStringLiteral("Return"))
+        return DocumentType::Return;
     return text == QStringLiteral("Outbound") ? DocumentType::Outbound
                                                : DocumentType::Transfer;
 }
@@ -67,6 +69,9 @@ InboundBatch readBatch(const QSqlQuery &query)
     batch.createdAt = QDateTime::fromString(query.value(11).toString(), Qt::ISODate);
     batch.confirmedAt = QDateTime::fromString(query.value(12).toString(), Qt::ISODate);
     batch.cancelledAt = QDateTime::fromString(query.value(13).toString(), Qt::ISODate);
+    batch.materialModel = query.value(14).toString();
+    batch.receivedById = query.value(15).toLongLong();
+    batch.receivedByName = query.value(16).toString();
     return batch;
 }
 
@@ -86,6 +91,8 @@ LogisticsDocument readLogistics(const QSqlQuery &query)
     document.createdAt = QDateTime::fromString(query.value(10).toString(), Qt::ISODate);
     document.confirmedAt = QDateTime::fromString(query.value(11).toString(), Qt::ISODate);
     document.cancelledAt = QDateTime::fromString(query.value(12).toString(), Qt::ISODate);
+    document.outboundConfirmedById = query.value(13).toLongLong();
+    document.outboundConfirmedByName = query.value(14).toString();
     return document;
 }
 
@@ -99,47 +106,201 @@ LogisticsLine readLogisticsLine(const QSqlQuery &query)
     line.batchNoSnapshot = query.value(4).toString();
     line.categoryNameSnapshot = query.value(5).toString();
     line.typeCodeSnapshot = query.value(6).toString();
+    line.productModelId = query.value(7).toLongLong();
+    line.modelCodeSnapshot = query.value(8).toString();
+    line.materialModel = query.value(9).toString();
     return line;
 }
 }
 
 DocumentRepository::DocumentRepository(Database &database) : database_(database) {}
 
+Result<QString> DocumentRepository::prepareNumber(const QString &requested,
+                                                   const QString &prefix,
+                                                   const QDate &businessDate,
+                                                   EntityId excludedId)
+{
+    const bool inbound = prefix == QStringLiteral("B");
+    const QString table = inbound ? QStringLiteral("inbound_batches")
+                                  : QStringLiteral("logistics_documents");
+    const QString column = inbound ? QStringLiteral("batch_no") : QStringLiteral("document_no");
+    const QString field = inbound ? QStringLiteral("batchNo") : QStringLiteral("documentNo");
+    QString number = requested.trimmed();
+    const auto saveSequence = [this](const QString &kind, const QString &date, qint64 value) {
+        QSqlQuery query(database_.connection());
+        query.prepare(QStringLiteral(
+            "INSERT INTO document_number_sequences(prefix,business_date,last_value) VALUES(?,?,?) "
+            "ON CONFLICT(prefix,business_date) DO UPDATE SET "
+            "last_value=MAX(last_value,excluded.last_value)"));
+        query.addBindValue(kind);
+        query.addBindValue(date);
+        query.addBindValue(value);
+        if (!query.exec())
+            return Result<bool>::failure(databaseError(query));
+        return Result<bool>::success(true);
+    };
+
+    if (number.isEmpty()) {
+        if (!businessDate.isValid())
+            return Result<QString>::failure({QStringLiteral("invalid"),
+                QStringLiteral("请选择有效的业务日期"), QStringLiteral("businessAt")});
+        const QString date = businessDate.toString(QStringLiteral("yyyyMMdd"));
+        const QString stem = prefix + QLatin1Char('-') + date + QLatin1Char('-');
+        qint64 last = 0;
+        QSqlQuery sequence(database_.connection());
+        sequence.prepare(QStringLiteral(
+            "SELECT last_value FROM document_number_sequences WHERE prefix=? AND business_date=?"));
+        sequence.addBindValue(prefix);
+        sequence.addBindValue(date);
+        if (!sequence.exec())
+            return Result<QString>::failure(databaseError(sequence));
+        if (sequence.next())
+            last = sequence.value(0).toLongLong();
+        else if (sequence.lastError().isValid())
+            return Result<QString>::failure(databaseError(sequence));
+        sequence.finish();
+
+        // 首次使用号段时也计入已有编号，避免与历史或手动编号重复。
+        QSqlQuery existing(database_.connection());
+        existing.prepare(QStringLiteral("SELECT %1 FROM %2 WHERE %1 LIKE ?").arg(column, table));
+        existing.addBindValue(stem + QLatin1Char('%'));
+        if (!existing.exec())
+            return Result<QString>::failure(databaseError(existing));
+        const QRegularExpression suffixPattern(QStringLiteral("^[0-9]{4,}$"));
+        while (existing.next()) {
+            const QString suffix = existing.value(0).toString().mid(stem.size());
+            bool ok = false;
+            const qint64 value = suffix.toLongLong(&ok);
+            if (ok && suffixPattern.match(suffix).hasMatch())
+                last = std::max(last, value);
+        }
+        if (existing.lastError().isValid())
+            return Result<QString>::failure(databaseError(existing));
+        existing.finish();
+        if (last == std::numeric_limits<qint64>::max())
+            return Result<QString>::failure({QStringLiteral("number_exhausted"),
+                QStringLiteral("该日期的编号已超出可用范围，请使用手动编号"), field});
+        number = stem + QStringLiteral("%1").arg(last + 1, 4, 10, QLatin1Char('0'));
+        const auto saved = saveSequence(prefix, date, last + 1);
+        if (!saved.ok())
+            return Result<QString>::failure(saved.error());
+    } else {
+        QSqlQuery existing(database_.connection());
+        existing.prepare(QStringLiteral("SELECT 1 FROM %1 WHERE %2=? AND id<>? LIMIT 1")
+                             .arg(table, column));
+        existing.addBindValue(number);
+        existing.addBindValue(excludedId);
+        if (!existing.exec())
+            return Result<QString>::failure(databaseError(existing));
+        if (existing.next())
+            return Result<QString>::failure({QStringLiteral("duplicate"),
+                inbound ? QStringLiteral("批次号已存在，请使用其他编号")
+                        : QStringLiteral("单号已存在，请使用其他编号"), field});
+        if (existing.lastError().isValid())
+            return Result<QString>::failure(databaseError(existing));
+        existing.finish();
+        const QRegularExpression pattern(inbound
+            ? QStringLiteral("^(B)-([0-9]{8})-([0-9]{4,})$")
+            : QStringLiteral("^(DB|CK|TH)-([0-9]{8})-([0-9]{4,})$"));
+        const auto match = pattern.match(number);
+        if (match.hasMatch() && QDate::fromString(match.captured(2), QStringLiteral("yyyyMMdd")).isValid()) {
+            bool ok = false;
+            const qint64 value = match.captured(3).toLongLong(&ok);
+            if (ok) {
+                const auto saved = saveSequence(match.captured(1), match.captured(2), value);
+                if (!saved.ok())
+                    return Result<QString>::failure(saved.error());
+            }
+        }
+    }
+    return Result<QString>::success(number);
+}
+
 Result<EntityId> DocumentRepository::insertInboundDraft(const InboundDraft &draft)
 {
-    QSqlQuery query(database_.connection());
-    query.prepare(QStringLiteral(
-        "INSERT INTO inbound_batches(batch_no,product_type_id,quantity,initial_location_id,"
-        "business_at,note,created_at) VALUES(?,?,?,?,?,?,?)"));
-    query.addBindValue(nullableBatchNumber(draft.batchNo));
-    query.addBindValue(draft.productTypeId);
-    query.addBindValue(draft.quantity);
-    query.addBindValue(draft.initialLocationId);
-    query.addBindValue(draft.businessAt.toString(Qt::ISODate));
-    query.addBindValue(draft.note.isNull() ? QStringLiteral("") : draft.note);
-    query.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
-    if (!query.exec())
-        return Result<EntityId>::failure(databaseError(query));
-    return Result<EntityId>::success(query.lastInsertId().toLongLong());
+    ServiceError operationError;
+    EntityId id = 0;
+    QString transactionError;
+    const bool committed = database_.transaction(Database::TransactionMode::Immediate, [&] {
+        const auto number = prepareNumber(draft.batchNo, QStringLiteral("B"), draft.businessAt.date());
+        if (!number.ok()) {
+            operationError = number.error();
+            return false;
+        }
+        QSqlQuery query(database_.connection());
+        query.prepare(QStringLiteral(
+            "INSERT INTO inbound_batches(batch_no,product_type_id,quantity,initial_location_id,"
+            "business_at,note,created_at,material_model,received_by_id) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0))"));
+        query.addBindValue(number.value());
+        query.addBindValue(draft.productTypeId);
+        query.addBindValue(draft.quantity);
+        query.addBindValue(draft.initialLocationId);
+        query.addBindValue(draft.businessAt.toString(Qt::ISODate));
+        query.addBindValue(draft.note.isNull() ? QStringLiteral("") : draft.note);
+        query.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+        query.addBindValue(draft.materialModel);
+        query.addBindValue(draft.receivedById);
+        if (!query.exec()) {
+            operationError = databaseError(query);
+            return false;
+        }
+        id = query.lastInsertId().toLongLong();
+        return true;
+    }, &transactionError);
+    if (!committed)
+        return Result<EntityId>::failure(operationError.code.isEmpty()
+            ? ServiceError{QStringLiteral("database"), transactionError, {}} : operationError);
+    return Result<EntityId>::success(id);
 }
 
 Result<bool> DocumentRepository::updateInboundDraft(EntityId id, const InboundDraft &draft)
 {
-    QSqlQuery query(database_.connection());
-    query.prepare(QStringLiteral(
-        "UPDATE inbound_batches SET batch_no=?,product_type_id=?,quantity=?,"
-        "initial_location_id=?,business_at=?,note=? WHERE id=? AND status='Draft'"));
-    query.addBindValue(nullableBatchNumber(draft.batchNo));
-    query.addBindValue(draft.productTypeId);
-    query.addBindValue(draft.quantity);
-    query.addBindValue(draft.initialLocationId);
-    query.addBindValue(draft.businessAt.toString(Qt::ISODate));
-    query.addBindValue(draft.note.isNull() ? QStringLiteral("") : draft.note);
-    query.addBindValue(id);
-    if (!query.exec())
-        return Result<bool>::failure(databaseError(query));
-    if (query.numRowsAffected() != 1)
-        return Result<bool>::failure(invalidStatus());
+    ServiceError operationError;
+    QString transactionError;
+    const bool committed = database_.transaction(Database::TransactionMode::Immediate, [&] {
+        const auto current = inboundById(id);
+        if (!current.ok()) {
+            operationError = current.error();
+            return false;
+        }
+        if (current.value().status != DocumentStatus::Draft) {
+            operationError = invalidStatus();
+            return false;
+        }
+        const auto number = prepareNumber(draft.batchNo.trimmed().isEmpty()
+                ? current.value().batchNo : draft.batchNo,
+            QStringLiteral("B"), draft.businessAt.date(), id);
+        if (!number.ok()) {
+            operationError = number.error();
+            return false;
+        }
+        QSqlQuery query(database_.connection());
+        query.prepare(QStringLiteral(
+            "UPDATE inbound_batches SET batch_no=?,product_type_id=?,quantity=?,"
+            "initial_location_id=?,business_at=?,note=?,material_model=?,received_by_id=NULLIF(?,0) "
+            "WHERE id=? AND status='Draft'"));
+        query.addBindValue(number.value());
+        query.addBindValue(draft.productTypeId);
+        query.addBindValue(draft.quantity);
+        query.addBindValue(draft.initialLocationId);
+        query.addBindValue(draft.businessAt.toString(Qt::ISODate));
+        query.addBindValue(draft.note.isNull() ? QStringLiteral("") : draft.note);
+        query.addBindValue(draft.materialModel);
+        query.addBindValue(draft.receivedById);
+        query.addBindValue(id);
+        if (!query.exec()) {
+            operationError = databaseError(query);
+            return false;
+        }
+        if (query.numRowsAffected() != 1) {
+            operationError = invalidStatus();
+            return false;
+        }
+        return true;
+    }, &transactionError);
+    if (!committed)
+        return Result<bool>::failure(operationError.code.isEmpty()
+            ? ServiceError{QStringLiteral("database"), transactionError, {}} : operationError);
     return Result<bool>::success(true);
 }
 
@@ -147,9 +308,11 @@ Result<InboundBatch> DocumentRepository::inboundById(EntityId id) const
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "SELECT id,batch_no,product_type_id,quantity,initial_location_id,business_at,status,"
-        "note,category_name_snapshot,type_code_snapshot,location_name_snapshot,"
-        "created_at,confirmed_at,cancelled_at FROM inbound_batches WHERE id=?"));
+        "SELECT b.id,b.batch_no,b.product_type_id,b.quantity,b.initial_location_id,b.business_at,b.status,"
+        "b.note,b.category_name_snapshot,b.type_code_snapshot,b.location_name_snapshot,"
+        "b.created_at,b.confirmed_at,b.cancelled_at,b.material_model,b.received_by_id,"
+        "CASE WHEN b.status='Draft' THEN COALESCE(p.name,'') ELSE b.received_by_name_snapshot END "
+        "FROM inbound_batches b LEFT JOIN personnel p ON p.id=b.received_by_id WHERE b.id=?"));
     query.addBindValue(id);
     if (!query.exec())
         return Result<InboundBatch>::failure(databaseError(query));
@@ -163,10 +326,12 @@ Result<QVector<InboundBatch>> DocumentRepository::inboundList() const
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "SELECT id,batch_no,product_type_id,quantity,initial_location_id,business_at,status,"
-        "note,category_name_snapshot,type_code_snapshot,location_name_snapshot,"
-        "created_at,confirmed_at,cancelled_at FROM inbound_batches "
-        "ORDER BY business_at DESC,created_at DESC,id DESC"));
+        "SELECT b.id,b.batch_no,b.product_type_id,b.quantity,b.initial_location_id,b.business_at,b.status,"
+        "b.note,b.category_name_snapshot,b.type_code_snapshot,b.location_name_snapshot,"
+        "b.created_at,b.confirmed_at,b.cancelled_at,b.material_model,b.received_by_id,"
+        "CASE WHEN b.status='Draft' THEN COALESCE(p.name,'') ELSE b.received_by_name_snapshot END "
+        "FROM inbound_batches b LEFT JOIN personnel p ON p.id=b.received_by_id "
+        "ORDER BY b.business_at DESC,b.created_at DESC,b.id DESC"));
     if (!query.exec()) return Result<QVector<InboundBatch>>::failure(databaseError(query));
     QVector<InboundBatch> rows;
     while (query.next()) rows.append(readBatch(query));
@@ -186,17 +351,18 @@ Result<bool> DocumentRepository::deleteInboundDraft(EntityId id)
 
 Result<bool> DocumentRepository::confirmInbound(
     EntityId id, const QString &categoryName, const QString &typeCode,
-    const QString &locationName, const QDateTime &confirmedAt)
+    const QString &locationName, const QDateTime &confirmedAt, const QString &receivedByName)
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
         "UPDATE inbound_batches SET status='Confirmed',category_name_snapshot=?,"
-        "type_code_snapshot=?,location_name_snapshot=?,confirmed_at=? "
+        "type_code_snapshot=?,location_name_snapshot=?,confirmed_at=?,received_by_name_snapshot=? "
         "WHERE id=? AND status='Draft'"));
     query.addBindValue(categoryName);
     query.addBindValue(typeCode);
     query.addBindValue(locationName);
     query.addBindValue(confirmedAt.toString(Qt::ISODate));
+    query.addBindValue(receivedByName);
     query.addBindValue(id);
     if (!query.exec())
         return Result<bool>::failure(databaseError(query));
@@ -226,17 +392,24 @@ Result<EntityId> DocumentRepository::insertLogisticsDraft(const LogisticsDraft &
     EntityId documentId = 0;
     QString transactionError;
     const bool committed = database_.transaction(Database::TransactionMode::Immediate, [&] {
+        const auto number = prepareNumber(draft.documentNo, numberPrefix(draft.type), draft.businessAt.date());
+        if (!number.ok()) {
+            operationError = number.error();
+            return false;
+        }
         QSqlQuery header(database_.connection());
         header.prepare(QStringLiteral(
             "INSERT INTO logistics_documents(document_no,type,source_location_id,"
-            "destination_location_id,business_at,note,created_at) VALUES(?,?,?,?,?,?,?)"));
-        header.addBindValue(nullableDocumentNumber(draft.documentNo));
+            "destination_location_id,business_at,note,created_at,outbound_confirmed_by_id) "
+            "VALUES(?,?,?,?,?,?,?,NULLIF(?,0))"));
+        header.addBindValue(number.value());
         header.addBindValue(typeText(draft.type));
         header.addBindValue(draft.sourceLocationId);
         header.addBindValue(draft.destinationLocationId);
         header.addBindValue(draft.businessAt.toString(Qt::ISODate));
         header.addBindValue(draft.note.isNull() ? QStringLiteral("") : draft.note);
         header.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+        header.addBindValue(draft.outboundConfirmedById);
         if (!header.exec()) {
             operationError = databaseError(header);
             return false;
@@ -245,11 +418,12 @@ Result<EntityId> DocumentRepository::insertLogisticsDraft(const LogisticsDraft &
         for (const LogisticsLineDraft &line : draft.lines) {
             QSqlQuery insert(database_.connection());
             insert.prepare(QStringLiteral(
-                "INSERT INTO logistics_document_lines(document_id,batch_id,quantity) "
-                "VALUES(?,?,?)"));
+                "INSERT INTO logistics_document_lines(document_id,batch_id,quantity,product_model_id) "
+                "VALUES(?,?,?,NULLIF(?,0))"));
             insert.addBindValue(documentId);
             insert.addBindValue(line.batchId);
             insert.addBindValue(line.quantity);
+            insert.addBindValue(line.productModelId);
             if (!insert.exec()) {
                 operationError = databaseError(insert);
                 return false;
@@ -268,16 +442,28 @@ Result<EntityId> DocumentRepository::insertLogisticsDraft(const LogisticsDraft &
 Result<bool> DocumentRepository::updateLogisticsDraft(EntityId id,
                                                       const LogisticsDraft &draft)
 {
+    const auto current = logisticsById(id);
+    if (!current.ok())
+        return Result<bool>::failure(current.error());
+    if (current.value().status != DocumentStatus::Draft)
+        return Result<bool>::failure(invalidStatus());
+    const auto number = prepareNumber(draft.documentNo.trimmed().isEmpty()
+            ? current.value().documentNo : draft.documentNo,
+        numberPrefix(draft.type), draft.businessAt.date(), id);
+    if (!number.ok())
+        return Result<bool>::failure(number.error());
     QSqlQuery header(database_.connection());
     header.prepare(QStringLiteral(
         "UPDATE logistics_documents SET document_no=?,type=?,source_location_id=?,"
-        "destination_location_id=?,business_at=?,note=? WHERE id=? AND status='Draft'"));
-    header.addBindValue(nullableDocumentNumber(draft.documentNo));
+        "destination_location_id=?,business_at=?,note=?,outbound_confirmed_by_id=NULLIF(?,0) "
+        "WHERE id=? AND status='Draft'"));
+    header.addBindValue(number.value());
     header.addBindValue(typeText(draft.type));
     header.addBindValue(draft.sourceLocationId);
     header.addBindValue(draft.destinationLocationId);
     header.addBindValue(draft.businessAt.toString(Qt::ISODate));
     header.addBindValue(draft.note.isNull() ? QStringLiteral("") : draft.note);
+    header.addBindValue(draft.outboundConfirmedById);
     header.addBindValue(id);
     if (!header.exec())
         return Result<bool>::failure(databaseError(header));
@@ -291,11 +477,12 @@ Result<bool> DocumentRepository::updateLogisticsDraft(EntityId id,
     for (const LogisticsLineDraft &line : draft.lines) {
         QSqlQuery insert(database_.connection());
         insert.prepare(QStringLiteral(
-            "INSERT INTO logistics_document_lines(document_id,batch_id,quantity) "
-            "VALUES(?,?,?)"));
+            "INSERT INTO logistics_document_lines(document_id,batch_id,quantity,product_model_id) "
+            "VALUES(?,?,?,NULLIF(?,0))"));
         insert.addBindValue(id);
         insert.addBindValue(line.batchId);
         insert.addBindValue(line.quantity);
+        insert.addBindValue(line.productModelId);
         if (!insert.exec())
             return Result<bool>::failure(databaseError(insert));
     }
@@ -306,9 +493,11 @@ Result<LogisticsDocument> DocumentRepository::logisticsById(EntityId id) const
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "SELECT id,document_no,type,source_location_id,destination_location_id,business_at,"
-        "status,note,source_name_snapshot,destination_name_snapshot,created_at,confirmed_at,"
-        "cancelled_at FROM logistics_documents WHERE id=?"));
+        "SELECT d.id,d.document_no,d.type,d.source_location_id,d.destination_location_id,d.business_at,"
+        "d.status,d.note,d.source_name_snapshot,d.destination_name_snapshot,d.created_at,d.confirmed_at,"
+        "d.cancelled_at,d.outbound_confirmed_by_id,"
+        "CASE WHEN d.status='Draft' THEN COALESCE(p.name,'') ELSE d.outbound_confirmed_by_name_snapshot END "
+        "FROM logistics_documents d LEFT JOIN personnel p ON p.id=d.outbound_confirmed_by_id WHERE d.id=?"));
     query.addBindValue(id);
     if (!query.exec())
         return Result<LogisticsDocument>::failure(databaseError(query));
@@ -319,7 +508,8 @@ Result<LogisticsDocument> DocumentRepository::logisticsById(EntityId id) const
     QSqlQuery lines(database_.connection());
     lines.prepare(QStringLiteral(
         "SELECT l.id,l.batch_id,l.quantity,b.product_type_id,"
-        "l.batch_no_snapshot,l.category_name_snapshot,l.type_code_snapshot "
+        "l.batch_no_snapshot,l.category_name_snapshot,l.type_code_snapshot,"
+        "l.product_model_id,l.model_code_snapshot,b.material_model "
         "FROM logistics_document_lines l JOIN inbound_batches b ON b.id=l.batch_id "
         "WHERE l.document_id=? ORDER BY l.id"));
     lines.addBindValue(id);
@@ -327,6 +517,8 @@ Result<LogisticsDocument> DocumentRepository::logisticsById(EntityId id) const
         return Result<LogisticsDocument>::failure(databaseError(lines));
     while (lines.next())
         document.lines.append(readLogisticsLine(lines));
+    if (lines.lastError().isValid())
+        return Result<LogisticsDocument>::failure(databaseError(lines));
     return Result<LogisticsDocument>::success(document);
 }
 
@@ -334,15 +526,55 @@ Result<QVector<LogisticsDocument>> DocumentRepository::logisticsList(DocumentTyp
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "SELECT id,document_no,type,source_location_id,destination_location_id,business_at,"
-        "status,note,source_name_snapshot,destination_name_snapshot,created_at,confirmed_at,"
-        "cancelled_at FROM logistics_documents WHERE type=? "
-        "ORDER BY business_at DESC,created_at DESC,id DESC"));
+        "SELECT d.id,d.document_no,d.type,d.source_location_id,d.destination_location_id,d.business_at,"
+        "d.status,d.note,d.source_name_snapshot,d.destination_name_snapshot,d.created_at,d.confirmed_at,"
+        "d.cancelled_at,d.outbound_confirmed_by_id,"
+        "CASE WHEN d.status='Draft' THEN COALESCE(p.name,'') ELSE d.outbound_confirmed_by_name_snapshot END "
+        "FROM logistics_documents d LEFT JOIN personnel p ON p.id=d.outbound_confirmed_by_id WHERE d.type=? "
+        "ORDER BY d.business_at DESC,d.created_at DESC,d.id DESC"));
     query.addBindValue(typeText(type));
     if (!query.exec()) return Result<QVector<LogisticsDocument>>::failure(databaseError(query));
     QVector<LogisticsDocument> rows;
     while (query.next()) rows.append(readLogistics(query));
     if (query.lastError().isValid()) return Result<QVector<LogisticsDocument>>::failure(databaseError(query));
+    return Result<QVector<LogisticsDocument>>::success(rows);
+}
+
+Result<QVector<LogisticsDocument>> DocumentRepository::logisticsForBatch(EntityId batchId) const
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "SELECT DISTINCT d.id,d.document_no,d.type,d.source_location_id,d.destination_location_id,"
+        "d.business_at,d.status,d.note,d.source_name_snapshot,d.destination_name_snapshot,"
+        "d.created_at,d.confirmed_at,d.cancelled_at,d.outbound_confirmed_by_id,"
+        "CASE WHEN d.status='Draft' THEN COALESCE(p.name,'') ELSE d.outbound_confirmed_by_name_snapshot END "
+        "FROM logistics_documents d LEFT JOIN personnel p ON p.id=d.outbound_confirmed_by_id "
+        "JOIN logistics_document_lines line ON line.document_id=d.id "
+        "WHERE line.batch_id=? ORDER BY d.business_at,d.created_at,d.id"));
+    query.addBindValue(batchId);
+    if (!query.exec())
+        return Result<QVector<LogisticsDocument>>::failure(databaseError(query));
+    QVector<LogisticsDocument> rows;
+    while (query.next()) {
+        LogisticsDocument document = readLogistics(query);
+        QSqlQuery lines(database_.connection());
+        lines.prepare(QStringLiteral(
+            "SELECT l.id,l.batch_id,l.quantity,b.product_type_id,"
+            "l.batch_no_snapshot,l.category_name_snapshot,l.type_code_snapshot,"
+            "l.product_model_id,l.model_code_snapshot,b.material_model "
+            "FROM logistics_document_lines l JOIN inbound_batches b ON b.id=l.batch_id "
+            "WHERE l.document_id=? ORDER BY l.id"));
+        lines.addBindValue(document.id);
+        if (!lines.exec())
+            return Result<QVector<LogisticsDocument>>::failure(databaseError(lines));
+        while (lines.next())
+            document.lines.append(readLogisticsLine(lines));
+        if (lines.lastError().isValid())
+            return Result<QVector<LogisticsDocument>>::failure(databaseError(lines));
+        rows.append(document);
+    }
+    if (query.lastError().isValid())
+        return Result<QVector<LogisticsDocument>>::failure(databaseError(query));
     return Result<QVector<LogisticsDocument>>::success(rows);
 }
 
@@ -356,17 +588,43 @@ Result<bool> DocumentRepository::deleteLogisticsDraft(EntityId id)
     return Result<bool>::success(true);
 }
 
+Result<QVector<ReturnableLine>> DocumentRepository::returnableLines(EntityId factoryLocationId) const
+{
+    QSqlQuery query(database_.connection());
+    query.prepare(QStringLiteral(
+        "SELECT b.id,b.product_type_id,0,b.batch_no,'',SUM(e.quantity_delta),b.material_model "
+        "FROM inventory_entries e JOIN inbound_batches b ON b.id=e.batch_id "
+        "JOIN locations l ON l.id=e.location_id "
+        "WHERE e.location_id=? AND l.type='Factory' AND l.counts_as_inventory=1 "
+        "AND l.enabled=1 AND b.status='Confirmed' "
+        "GROUP BY b.id,b.product_type_id,b.batch_no,b.material_model "
+        "HAVING SUM(e.quantity_delta)>0 ORDER BY b.batch_no,b.id"));
+    query.addBindValue(factoryLocationId);
+    if (!query.exec()) return Result<QVector<ReturnableLine>>::failure(databaseError(query));
+    QVector<ReturnableLine> rows;
+    while (query.next()) {
+        rows.append({query.value(0).toLongLong(), query.value(1).toLongLong(),
+                     query.value(2).toLongLong(), query.value(3).toString(),
+                     query.value(4).toString(), query.value(5).toLongLong(),
+                     query.value(6).toString()});
+    }
+    if (query.lastError().isValid())
+        return Result<QVector<ReturnableLine>>::failure(databaseError(query));
+    return Result<QVector<ReturnableLine>>::success(rows);
+}
+
 Result<bool> DocumentRepository::updateLogisticsLineSnapshots(
     EntityId lineId, const QString &batchNo, const QString &categoryName,
-    const QString &typeCode)
+    const QString &typeCode, const QString &modelCode)
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
         "UPDATE logistics_document_lines SET batch_no_snapshot=?,category_name_snapshot=?,"
-        "type_code_snapshot=? WHERE id=?"));
+        "type_code_snapshot=?,model_code_snapshot=? WHERE id=?"));
     query.addBindValue(batchNo);
     query.addBindValue(categoryName);
     query.addBindValue(typeCode);
+    query.addBindValue(modelCode);
     query.addBindValue(lineId);
     if (!query.exec())
         return Result<bool>::failure(databaseError(query));
@@ -378,15 +636,17 @@ Result<bool> DocumentRepository::updateLogisticsLineSnapshots(
 
 Result<bool> DocumentRepository::confirmLogistics(
     EntityId id, const QString &sourceName, const QString &destinationName,
-    const QDateTime &confirmedAt)
+    const QDateTime &confirmedAt, const QString &outboundConfirmedByName)
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
         "UPDATE logistics_documents SET status='Confirmed',source_name_snapshot=?,"
-        "destination_name_snapshot=?,confirmed_at=? WHERE id=? AND status='Draft'"));
+        "destination_name_snapshot=?,confirmed_at=?,outbound_confirmed_by_name_snapshot=? "
+        "WHERE id=? AND status='Draft'"));
     query.addBindValue(sourceName);
     query.addBindValue(destinationName);
     query.addBindValue(confirmedAt.toString(Qt::ISODate));
+    query.addBindValue(outboundConfirmedByName.isNull() ? QStringLiteral("") : outboundConfirmedByName);
     query.addBindValue(id);
     if (!query.exec())
         return Result<bool>::failure(databaseError(query));

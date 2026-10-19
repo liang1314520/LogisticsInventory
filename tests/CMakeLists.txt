@@ -45,6 +45,22 @@ add_executable(tst_report_service tst_report_service.cpp)
 target_link_libraries(tst_report_service PRIVATE logistics_master_data Qt6::Test)
 add_test(NAME report_service COMMAND tst_report_service)
 
+add_executable(tst_batch_workflow_service
+    tst_batch_workflow_service.cpp
+    test_support.cpp
+    test_support.h
+)
+target_link_libraries(tst_batch_workflow_service PRIVATE logistics_master_data Qt6::Test)
+add_test(NAME batch_workflow_service COMMAND tst_batch_workflow_service)
+
+add_executable(tst_workflow_bar
+    tst_workflow_bar.cpp
+    test_support.cpp
+    test_support.h
+)
+target_link_libraries(tst_workflow_bar PRIVATE logistics_ui Qt6::Test Qt6::Widgets)
+add_test(NAME workflow_bar COMMAND tst_workflow_bar)
+
 add_executable(tst_main_window
     tst_main_window.cpp
     test_support.cpp

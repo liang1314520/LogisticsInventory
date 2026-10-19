@@ -35,6 +35,8 @@ add_library(logistics_master_data
     src/services/report_service.h
     src/services/master_data_service.cpp
     src/services/master_data_service.h
+    src/services/batch_workflow_service.cpp
+    src/services/batch_workflow_service.h
 )
 target_include_directories(logistics_master_data PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(logistics_master_data PUBLIC logistics_database Qt6::Core Qt6::Sql)
@@ -64,6 +66,14 @@ add_library(logistics_ui
     src/ui/pages/master_data_page.h
     src/ui/pages/reports_page.cpp
     src/ui/pages/reports_page.h
+    src/ui/widgets/workflow_bar.cpp
+    src/ui/widgets/workflow_bar.h
+    src/ui/widgets/date_time_input.cpp
+    src/ui/widgets/date_time_input.h
+    src/ui/widgets/status_presentation.cpp
+    src/ui/widgets/status_presentation.h
+    src/ui/widgets/layout_utils.cpp
+    src/ui/widgets/layout_utils.h
 )
 target_include_directories(logistics_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(logistics_ui PUBLIC logistics_master_data Qt6::Widgets)

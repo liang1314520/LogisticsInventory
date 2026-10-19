@@ -2,5 +2,9 @@
     <qresource prefix="/migrations">
         <file alias="001_initial.sql">001_initial.sql</file>
         <file alias="002_product_types.sql">002_product_types.sql</file>
+        <file alias="003_product_models.sql">003_product_models.sql</file>
+        <file alias="004_document_number_sequences.sql">004_document_number_sequences.sql</file>
+        <file alias="005_inbound_material_model.sql">005_inbound_material_model.sql</file>
+        <file alias="006_document_people.sql">006_document_people.sql</file>
     </qresource>
 </RCC>

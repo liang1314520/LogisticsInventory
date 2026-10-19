@@ -3,31 +3,30 @@
 #include "services/inbound_service.h"
 #include "services/master_data_service.h"
 #include "ui/dialogs/inbound_dialog.h"
+#include "ui/widgets/status_presentation.h"
+#include "ui/widgets/layout_utils.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QTableWidget>
 #include <QVariant>
 #include <QVBoxLayout>
 
 #include <utility>
 
-namespace {
-QString statusText(DocumentStatus status)
-{
-    if (status == DocumentStatus::Confirmed) return QStringLiteral("已确认");
-    if (status == DocumentStatus::Cancelled) return QStringLiteral("已取消");
-    return QStringLiteral("草稿");
-}
-}
-
 InboundPage::InboundPage(MasterDataService &masterData, InboundService &service, QWidget *parent)
     : QWidget(parent), masterData_(masterData), service_(service)
 {
     setObjectName(QStringLiteral("inboundPage"));
     auto *layout = new QVBoxLayout(this); auto *actions = new QHBoxLayout;
+    workflowContext_ = new QLabel(this);
+    workflowContext_->setObjectName(QStringLiteral("workflowContext"));
+    workflowContext_->setWordWrap(true);
+    workflowContext_->setText(QStringLiteral("步骤 02 / 06：公司入库\n前置：准备产品名称和公司库存库位\n当前操作：新建并确认公司入库\n下一步：调拨到工厂，再从工厂出库到 Amazon"));
+    layout->addWidget(workflowContext_);
     const auto button = [this, actions](const QString &text, const QString &name) {
         auto *value = new QPushButton(text, this); value->setObjectName(name); actions->addWidget(value); return value;
     };
@@ -39,10 +38,12 @@ InboundPage::InboundPage(MasterDataService &masterData, InboundService &service,
     cancel_ = button(QStringLiteral("取消确认"), QStringLiteral("cancelButton"));
     copy_ = button(QStringLiteral("复制为草稿"), QStringLiteral("copyButton"));
     layout->addLayout(actions);
-    table_ = new QTableWidget(0, 5, this); table_->setObjectName(QStringLiteral("documents"));
-    table_->setHorizontalHeaderLabels({QStringLiteral("ID"), QStringLiteral("批次号"),
-        QStringLiteral("业务日期"), QStringLiteral("状态"), QStringLiteral("数量")});
+    table_ = new QTableWidget(0, 7, this); table_->setObjectName(QStringLiteral("documents"));
+    table_->setHorizontalHeaderLabels({QStringLiteral("序号"), QStringLiteral("批次号"),
+        QStringLiteral("业务日期"), QStringLiteral("状态"), QStringLiteral("数量"),
+        QStringLiteral("物料型号"), QStringLiteral("入库签收人")});
     table_->setSelectionBehavior(QAbstractItemView::SelectRows); table_->setSelectionMode(QAbstractItemView::SingleSelection);
+    table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     layout->addWidget(table_);
     error_ = new QLabel(this); error_->setObjectName(QStringLiteral("errorLabel"));
     error_->setStyleSheet(QStringLiteral("color:#b00020")); error_->setWordWrap(true); layout->addWidget(error_);
@@ -56,7 +57,14 @@ InboundPage::InboundPage(MasterDataService &masterData, InboundService &service,
     connect(confirm_, &QPushButton::clicked, this, &InboundPage::confirmSelected);
     connect(cancel_, &QPushButton::clicked, this, &InboundPage::cancelSelected);
     connect(copy_, &QPushButton::clicked, this, &InboundPage::copySelected);
-    connect(table_, &QTableWidget::itemSelectionChanged, this, &InboundPage::updateActions);
+    connect(table_, &QTableWidget::itemSelectionChanged, this, [this] {
+        updateActions();
+        const EntityId id = selectedId();
+        if (id > 0 && id != currentBatchId_) {
+            currentBatchId_ = id;
+            emit batchSelected(id);
+        }
+    });
     refresh();
 }
 
@@ -64,21 +72,72 @@ Result<bool> InboundPage::refresh()
 {
     const auto result = service_.list();
     if (!result.ok()) { setError(result.error()); return Result<bool>::failure(lastError_); }
+    const QSignalBlocker blocker(table_);
     setError(); table_->clearContents();
+    table_->setCurrentCell(-1, -1);
     table_->setRowCount(static_cast<int>(result.value().size()));
     for (int row = 0; row < result.value().size(); ++row) {
         const auto &batch = result.value().at(row);
-        const QStringList cells{QString::number(batch.id), batch.batchNo,
-            batch.businessAt.toString(QStringLiteral("yyyy-MM-dd HH:mm")), statusText(batch.status),
-            QString::number(batch.quantity)};
+        const QStringList cells{QString::number(row + 1), batch.batchNo,
+            batch.businessAt.toString(QStringLiteral("yyyy-MM-dd HH:mm")), StatusPresentation::documentText(batch.status),
+            QString::number(batch.quantity),
+            batch.materialModel.isEmpty() ? QStringLiteral("未填写") : batch.materialModel,
+            batch.receivedByName.isEmpty() ? QStringLiteral("未填写") : batch.receivedByName};
         for (int column = 0; column < cells.size(); ++column) table_->setItem(row, column, new QTableWidgetItem(cells.at(column)));
+        StatusPresentation::apply(table_->item(row, 3), StatusPresentation::tone(batch.status));
         table_->item(row, 0)->setData(Qt::UserRole, QVariant::fromValue(batch.status));
+        table_->item(row, 0)->setData(Qt::UserRole + 1, batch.id);
     }
-    updateActions(); return Result<bool>::success(true);
+    if (currentBatchId_ > 0)
+        selectBatch(currentBatchId_);
+    else
+        updateActions();
+    LayoutUtils::fitTableColumns(table_);
+    return Result<bool>::success(true);
+}
+
+void InboundPage::setCurrentBatch(EntityId batchId)
+{
+    currentBatchId_ = batchId;
+    selectBatch(batchId);
+}
+
+EntityId InboundPage::currentBatchId() const { return currentBatchId_; }
+
+Result<bool> InboundPage::selectBatch(EntityId batchId)
+{
+    for (int row = 0; row < table_->rowCount(); ++row) {
+        if (table_->item(row, 0)->data(Qt::UserRole + 1).toLongLong() != batchId)
+            continue;
+        {
+            const QSignalBlocker blocker(table_);
+            table_->selectRow(row);
+        }
+        updateActions();
+        setError();
+        return Result<bool>::success(true);
+    }
+    const QSignalBlocker blocker(table_);
+    table_->clearSelection();
+    table_->setCurrentCell(-1, -1);
+    updateActions();
+    setError();
+    return Result<bool>::failure({QStringLiteral("not_found"), QStringLiteral("入库记录不存在"),
+                                  QStringLiteral("batchId")});
+}
+
+void InboundPage::setWorkflowMessage(const QString &message)
+{
+    if (workflowContext_)
+        workflowContext_->setText(QStringLiteral("步骤 02 / 06：公司入库\n%1").arg(message));
 }
 
 ServiceError InboundPage::lastError() const { return lastError_; }
-EntityId InboundPage::selectedId() const { const int row = table_->currentRow(); return row < 0 ? 0 : table_->item(row, 0)->text().toLongLong(); }
+EntityId InboundPage::selectedId() const
+{
+    const int row = table_->currentRow();
+    return row < 0 ? 0 : table_->item(row, 0)->data(Qt::UserRole + 1).toLongLong();
+}
 void InboundPage::updateActions()
 {
     const int row = table_->currentRow(); const bool selected = row >= 0;

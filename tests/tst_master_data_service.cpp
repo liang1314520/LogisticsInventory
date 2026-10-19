@@ -24,6 +24,8 @@ private slots:
     void reportsReferenceCountsForUsedMasterData();
     void deleteCascadeRemovesDependentDocumentsAndEntries();
     void deleteRejectsMissingRecords();
+    void productModelsSupportCrudScopedKeysAndEnablement();
+    void deletingModelCascadesDocumentsAndReturns();
 
 private:
     std::unique_ptr<TestDatabase> db;
@@ -279,6 +281,81 @@ void MasterDataServiceTest::deleteRejectsMissingRecords()
     const auto location = service->deleteLocation(999);
     QVERIFY(!location.ok());
     QCOMPARE(location.error().code, QStringLiteral("not_found"));
+}
+
+void MasterDataServiceTest::productModelsSupportCrudScopedKeysAndEnablement()
+{
+    const auto category = service->createCategory(QStringLiteral("设备"));
+    QVERIFY(category.ok());
+    const auto safe = service->createProductType(category.value().id, QStringLiteral("保险箱"), {});
+    const auto gateway = service->createProductType(category.value().id, QStringLiteral("网关"), {});
+    QVERIFY(safe.ok() && gateway.ok());
+    const auto model = service->createProductModel(safe.value().id, QStringLiteral(" F25 "), {});
+    QVERIFY(model.ok());
+    QCOMPARE(model.value().modelCode, QStringLiteral("F25"));
+    QCOMPARE(service->createProductModel(safe.value().id, QStringLiteral("F25"), {}).error().code,
+             QStringLiteral("duplicate"));
+    QCOMPARE(service->createProductModel(safe.value().id, QStringLiteral(" "), {}).error().field,
+             QStringLiteral("modelCode"));
+    QVERIFY(service->createProductModel(gateway.value().id, QStringLiteral("F25"), {}).ok());
+    QCOMPARE(service->createProductModel(999, QStringLiteral("F25"), {}).error().field,
+             QStringLiteral("productTypeId"));
+    QVERIFY(service->updateProductModel(model.value().id, safe.value().id, QStringLiteral("P25"), {}).ok());
+    QCOMPARE(service->productModelById(model.value().id).value().modelCode, QStringLiteral("P25"));
+    QCOMPARE(service->enabledProductModelsForTypeResult(safe.value().id).value().size(), 1);
+    QVERIFY(service->setProductModelEnabled(model.value().id, false).ok());
+    QVERIFY(service->enabledProductModelsForTypeResult(safe.value().id).value().isEmpty());
+    QCOMPARE(service->allProductModelsResult().value().size(), 2);
+    QVERIFY(service->setProductModelEnabled(model.value().id, true).ok());
+    QVERIFY(service->setProductTypeEnabled(safe.value().id, false).ok());
+    QVERIFY(service->enabledProductModelsForTypeResult(safe.value().id).value().isEmpty());
+    QVERIFY(service->deleteProductType(safe.value().id).ok());
+    QVERIFY(!service->productModelById(model.value().id).ok());
+    const auto remaining = service->allProductModelsResult();
+    QVERIFY(remaining.ok());
+    QCOMPARE(remaining.value().size(), 1);
+    QVERIFY(service->deleteProductModel(remaining.value().front().id).ok());
+    QVERIFY(service->allProductModelsResult().value().isEmpty());
+    QCOMPARE(db->scalar(QStringLiteral("SELECT COUNT(*) FROM pragma_foreign_key_check")).toInt(), 0);
+}
+
+void MasterDataServiceTest::deletingModelCascadesDocumentsAndReturns()
+{
+    const auto category = service->createCategory(QStringLiteral("设备"));
+    QVERIFY(category.ok());
+    const auto type = service->createProductType(category.value().id, QStringLiteral("保险箱"), {});
+    QVERIFY(type.ok());
+    const auto f25 = service->createProductModel(type.value().id, QStringLiteral("F25"), {});
+    const auto p25 = service->createProductModel(type.value().id, QStringLiteral("P25"), {});
+    const auto warehouse = service->createLocation(QStringLiteral("仓库"), LocationType::Company, true);
+    const auto factory = service->createLocation(QStringLiteral("外部工厂"), LocationType::Factory, false);
+    QVERIFY(f25.ok() && p25.ok() && warehouse.ok() && factory.ok());
+    DocumentRepository documents(db->database());
+    InventoryRepository inventory(db->database());
+    InboundService inbound(db->database(), *repository, documents, inventory);
+    LogisticsService logistics(db->database(), *repository, documents, inventory);
+    const auto at = QDateTime::currentDateTime();
+    const auto batch = inbound.createDraft({QStringLiteral("B-1"), type.value().id, 100,
+                                            warehouse.value().id, at, {}});
+    QVERIFY(batch.ok());
+    QVERIFY(inbound.confirm(batch.value()).ok());
+    const auto sent = logistics.createDraft({QStringLiteral("O-MIX"), DocumentType::Outbound,
+        warehouse.value().id, factory.value().id, at, {},
+        {{batch.value(), 50, f25.value().id}, {batch.value(), 50, p25.value().id}}});
+    QVERIFY(sent.ok());
+    QVERIFY(logistics.confirm(sent.value()).ok());
+    const auto returned = logistics.createDraft({QStringLiteral("R-1"), DocumentType::Return,
+        factory.value().id, warehouse.value().id, at, {}, {{batch.value(), 5, f25.value().id}}});
+    QVERIFY(returned.ok());
+    QVERIFY(logistics.confirm(returned.value()).ok());
+    QVERIFY(logistics.cancel(returned.value()).ok());
+    QVERIFY(service->deleteProductModel(f25.value().id).ok());
+    QVERIFY(!documents.logisticsById(sent.value()).ok());
+    QVERIFY(!documents.logisticsById(returned.value()).ok());
+    QVERIFY(service->productModelById(p25.value().id).ok());
+    QCOMPARE(inventory.quantity(batch.value(), warehouse.value().id), qint64(100));
+    QCOMPARE(db->scalar(QStringLiteral("SELECT COUNT(*) FROM inventory_entries WHERE source_type='Logistics'")).toInt(), 0);
+    QCOMPARE(db->scalar(QStringLiteral("SELECT COUNT(*) FROM pragma_foreign_key_check")).toInt(), 0);
 }
 
 QTEST_MAIN(MasterDataServiceTest)

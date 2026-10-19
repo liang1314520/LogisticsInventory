@@ -2,6 +2,7 @@
 
 #include "core/models.h"
 #include "core/result.h"
+#include "services/batch_workflow_service.h"
 
 #include <functional>
 #include <QWidget>
@@ -17,8 +18,13 @@ class LogisticsPage final : public QWidget {
     Q_OBJECT
 public:
     LogisticsPage(MasterDataService &masterData, InventoryQueryService &queries,
-                  LogisticsService &service, DocumentType type, QWidget *parent = nullptr);
+                  LogisticsService &service, DocumentType type, QWidget *parent = nullptr,
+                  BatchWorkflowService *workflow = nullptr);
     Result<bool> refresh();
+    void setCurrentBatch(EntityId batchId);
+    EntityId currentBatchId() const;
+    Result<bool> selectBatch(EntityId batchId);
+    void setWorkflowMessage(const QString &message);
     ServiceError lastError() const;
     void setConfirmationCallback(std::function<bool(const QString &)> callback);
     Result<bool> openCreateDialog();
@@ -30,6 +36,7 @@ signals:
     void editRequested(EntityId id);
     void viewRequested(EntityId id);
     void dataChanged();
+    void batchSelected(EntityId batchId);
 
 private slots:
     void updateActions();
@@ -42,6 +49,7 @@ private slots:
 
 private:
     EntityId selectedId() const;
+    WorkflowAction actionForType() const;
     bool confirmAction(const QString &text) const;
     void setError(const ServiceError &error = {});
     MasterDataService &masterData_;
@@ -50,6 +58,9 @@ private:
     DocumentType type_;
     QTableWidget *table_ = nullptr;
     QLabel *error_ = nullptr;
+    QLabel *workflowContext_ = nullptr;
+    BatchWorkflowService *workflow_ = nullptr;
+    EntityId currentBatchId_ = 0;
     QPushButton *edit_ = nullptr;
     QPushButton *view_ = nullptr;
     QPushButton *remove_ = nullptr;

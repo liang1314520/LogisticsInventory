@@ -43,8 +43,7 @@ ServiceError LogisticsService::validateDraft(const LogisticsDraft &draft, bool r
     if (draft.destinationLocationId <= 0)
         return error(QStringLiteral("invalid"), QStringLiteral("字段值无效"),
                      QStringLiteral("destinationLocationId"));
-    if (draft.type == DocumentType::Transfer &&
-        draft.sourceLocationId == draft.destinationLocationId)
+    if (draft.sourceLocationId == draft.destinationLocationId)
         return error(QStringLiteral("invalid"), QStringLiteral("字段值无效"),
                      QStringLiteral("destinationLocationId"));
     if (!draft.businessAt.isValid())
@@ -53,16 +52,76 @@ ServiceError LogisticsService::validateDraft(const LogisticsDraft &draft, bool r
     if (draft.lines.isEmpty())
         return error(QStringLiteral("required"), QStringLiteral("至少需要一条明细"),
                      QStringLiteral("lines"));
-    QSet<EntityId> batches;
+    if (draft.type != DocumentType::Transfer && draft.type != DocumentType::Outbound &&
+        draft.type != DocumentType::Return)
+        return error(QStringLiteral("invalid"), QStringLiteral("单据类型无效"), QStringLiteral("type"));
+    if (draft.type == DocumentType::Outbound) {
+        if (draft.outboundConfirmedById < 0)
+            return error(QStringLiteral("invalid"), QStringLiteral("出库确认人无效"),
+                         QStringLiteral("outboundConfirmedById"));
+        if (draft.outboundConfirmedById > 0) {
+            const auto person = masterData_.personnelById(draft.outboundConfirmedById);
+            if (!person.ok())
+                return error(person.error().code, person.error().message,
+                             QStringLiteral("outboundConfirmedById"));
+            if (!person.value().enabled)
+                return error(QStringLiteral("invalid_master_data"),
+                    QStringLiteral("出库确认人已停用，请编辑草稿重新选择"),
+                    QStringLiteral("outboundConfirmedById"));
+        }
+    }
+    const auto source = masterData_.locationById(draft.sourceLocationId);
+    if (!source.ok())
+        return error(source.error().code, source.error().message, QStringLiteral("sourceLocationId"));
+    const auto sourceType = draft.type == DocumentType::Transfer
+        ? LocationType::Company : LocationType::Factory;
+    if (!source.value().enabled || source.value().type != sourceType ||
+        !source.value().countsAsInventory)
+        return error(QStringLiteral("invalid_master_data"),
+            draft.type == DocumentType::Transfer
+                ? QStringLiteral("调拨来源必须是已启用且计库存的公司库位")
+                : QStringLiteral("出库或退回来源必须是已启用且计库存的工厂"),
+            QStringLiteral("sourceLocationId"));
+    const auto destination = masterData_.locationById(draft.destinationLocationId);
+    if (!destination.ok())
+        return error(destination.error().code, destination.error().message,
+                     QStringLiteral("destinationLocationId"));
+    bool destinationValid = destination.value().enabled;
+    QString destinationMessage;
+    switch (draft.type) {
+    case DocumentType::Transfer:
+        destinationValid = destinationValid && destination.value().countsAsInventory &&
+            destination.value().type == LocationType::Factory;
+        destinationMessage = QStringLiteral("调拨目的地必须是已启用且计库存的工厂");
+        break;
+    case DocumentType::Outbound:
+        destinationValid = destinationValid && !destination.value().countsAsInventory &&
+            destination.value().type != LocationType::Company &&
+            destination.value().type != LocationType::Factory;
+        destinationMessage = QStringLiteral("出库目的地必须是已启用且不计库存的外部地点（如海外 Amazon 仓）");
+        break;
+    case DocumentType::Return:
+        destinationValid = destinationValid && destination.value().countsAsInventory &&
+            destination.value().type == LocationType::Company;
+        destinationMessage = QStringLiteral("退回目的地必须是已启用且计库存的公司库位");
+        break;
+    }
+    if (!destinationValid)
+        return error(QStringLiteral("invalid_master_data"), destinationMessage,
+                     QStringLiteral("destinationLocationId"));
+    QSet<QString> choices;
     for (int i = 0; i < draft.lines.size(); ++i) {
         const LogisticsLineDraft &line = draft.lines.at(i);
         const QString prefix = QStringLiteral("lines[%1].").arg(i);
         if (line.batchId <= 0)
             return error(QStringLiteral("invalid"), QStringLiteral("明细批次无效"), prefix + QStringLiteral("batchId"));
-        if (batches.contains(line.batchId))
-            return error(QStringLiteral("duplicate_batch"), QStringLiteral("同一单据不能重复选择批次"),
+        if (line.productModelId < 0)
+            return error(QStringLiteral("invalid"), QStringLiteral("型号无效"), prefix + QStringLiteral("productModelId"));
+        const QString key = QStringLiteral("%1:%2").arg(line.batchId).arg(line.productModelId);
+        if (choices.contains(key))
+            return error(QStringLiteral("duplicate_batch"), QStringLiteral("同一批次的同一型号请合并为一行"),
                          prefix + QStringLiteral("batchId"));
-        batches.insert(line.batchId);
+        choices.insert(key);
         if (line.quantity <= 0)
             return error(QStringLiteral("invalid"), QStringLiteral("明细数量无效"), prefix + QStringLiteral("quantity"));
     }
@@ -78,30 +137,35 @@ ServiceError LogisticsService::validateDocument(const LogisticsDocument &documen
     draft.destinationLocationId = document.destinationLocationId;
     draft.businessAt = document.businessAt;
     draft.note = document.note;
+    draft.outboundConfirmedById = document.outboundConfirmedById;
     for (const LogisticsLine &line : document.lines)
-        draft.lines.append({line.batchId, line.quantity});
+        draft.lines.append({line.batchId, line.quantity, line.productModelId});
     return validateDraft(draft);
 }
 
 Result<EntityId> LogisticsService::createDraft(const LogisticsDraft &draft)
 {
-    const ServiceError validation = validateDraft(draft);
+    const ServiceError validation = validateDraft(draft, false);
     if (!validation.code.isEmpty())
         return Result<EntityId>::failure(validation);
     LogisticsDraft normalized = draft;
     normalized.documentNo = normalized.documentNo.trimmed();
     normalized.note = normalized.note.trimmed();
+    if (normalized.type != DocumentType::Outbound)
+        normalized.outboundConfirmedById = 0;
     return documents_.insertLogisticsDraft(normalized);
 }
 
 Result<bool> LogisticsService::updateDraft(EntityId id, const LogisticsDraft &draft)
 {
-    const ServiceError validation = validateDraft(draft);
+    const ServiceError validation = validateDraft(draft, false);
     if (!validation.code.isEmpty())
         return Result<bool>::failure(validation);
     LogisticsDraft normalized = draft;
     normalized.documentNo = normalized.documentNo.trimmed();
     normalized.note = normalized.note.trimmed();
+    if (normalized.type != DocumentType::Outbound)
+        normalized.outboundConfirmedById = 0;
     ServiceError operationError;
     QString transactionError;
     const bool committed = database_.transaction(Database::TransactionMode::Immediate, [&] {
@@ -140,6 +204,27 @@ Result<bool> LogisticsService::cancel(EntityId id)
             operationError = invalidStatus();
             return false;
         }
+        if (document.type == DocumentType::Outbound) {
+            QSet<EntityId> checkedBatches;
+            for (const auto &line : document.lines) {
+                if (checkedBatches.contains(line.batchId))
+                    continue;
+                checkedBatches.insert(line.batchId);
+                const auto related = documents_.logisticsForBatch(line.batchId);
+                if (!related.ok()) {
+                    operationError = related.error();
+                    return false;
+                }
+                for (const auto &item : related.value()) {
+                    if (item.type == DocumentType::Return && item.status == DocumentStatus::Confirmed &&
+                        item.sourceLocationId == document.destinationLocationId) {
+                        operationError = error(QStringLiteral("return_dependency"),
+                            QStringLiteral("出库目的地已有该批次的退回，请先取消相关退回单"));
+                        return false;
+                    }
+                }
+            }
+        }
         const auto originals = inventory_.unreversedEntriesForSource(QStringLiteral("Logistics"), id);
         if (!originals.ok()) {
             operationError = originals.error();
@@ -161,12 +246,18 @@ Result<bool> LogisticsService::cancel(EntityId id)
                 }
                 resulting.insert(key, quantity.value());
             }
-            resulting[key] -= entry.quantityDelta;
-            if (resulting.value(key) < 0) {
+            if (entry.quantityDelta > 0 && resulting.value(key) < entry.quantityDelta) {
                 operationError = error(QStringLiteral("stock_dependency"),
                                        QStringLiteral("取消将导致库存为负，存在后续库存依赖"));
                 return false;
             }
+            if (entry.quantityDelta < 0 &&
+                resulting.value(key) > std::numeric_limits<qint64>::max() + entry.quantityDelta) {
+                operationError = error(QStringLiteral("quantity_overflow"),
+                                       QStringLiteral("取消后的库存数量超出范围"));
+                return false;
+            }
+            resulting[key] -= entry.quantityDelta;
         }
         for (const InventoryEntry &entry : originals.value()) {
             const auto reversal = inventory_.insertEntry(
@@ -222,24 +313,30 @@ Result<bool> LogisticsService::confirm(EntityId id)
                                                 : QStringLiteral("destinationLocationId"));
             return false;
         }
-        if (!source.value().enabled || !source.value().countsAsInventory) {
-            operationError = invalidMasterData(QStringLiteral("sourceLocationId"));
-            return false;
+        QString outboundConfirmedByName;
+        if (document.type == DocumentType::Outbound) {
+            if (document.outboundConfirmedById == 0) {
+                operationError = error(QStringLiteral("required"),
+                    QStringLiteral("请先编辑草稿选择出库确认人，再确认出库"),
+                    QStringLiteral("outboundConfirmedById"));
+                return false;
+            }
+            const auto person = masterData_.personnelById(document.outboundConfirmedById);
+            if (!person.ok()) {
+                operationError = error(person.error().code, person.error().message,
+                                       QStringLiteral("outboundConfirmedById"));
+                return false;
+            }
+            outboundConfirmedByName = person.value().name;
         }
-        const bool destinationValid = document.type == DocumentType::Transfer
-            ? destination.value().enabled && destination.value().countsAsInventory
-            : destination.value().enabled && !destination.value().countsAsInventory;
-        if (!destinationValid) {
-            operationError = invalidMasterData(QStringLiteral("destinationLocationId"));
-            return false;
-        }
-
+        const bool internalMovement = document.type != DocumentType::Outbound;
         QHash<EntityId, qint64> requiredByBatch;
         QHash<EntityId, int> firstLineByBatch;
         struct ConfirmedLineData {
             InboundBatch batch;
             ProductType productType;
             ProductCategory category;
+            QString modelCode;
         };
         QVector<ConfirmedLineData> confirmedLines;
         confirmedLines.reserve(document.lines.size());
@@ -268,7 +365,23 @@ Result<bool> LogisticsService::confirm(EntityId id)
                 operationError = invalidMasterData(QStringLiteral("lines[%1].batchId").arg(i));
                 return false;
             }
-            confirmedLines.append({batch.value(), productType.value(), category.value()});
+            QString modelCode;
+            if (line.productModelId > 0) {
+                const auto model = masterData_.productModelById(line.productModelId);
+                if (!model.ok()) {
+                    operationError = error(model.error().code, model.error().message,
+                                           QStringLiteral("lines[%1].productModelId").arg(i));
+                    return false;
+                }
+                if (!model.value().enabled || model.value().productTypeId != batch.value().productTypeId) {
+                    operationError = error(QStringLiteral("invalid_master_data"),
+                        QStringLiteral("型号已停用或不属于该批次的产品类型"),
+                        QStringLiteral("lines[%1].productModelId").arg(i));
+                    return false;
+                }
+                modelCode = model.value().modelCode;
+            }
+            confirmedLines.append({batch.value(), productType.value(), category.value(), modelCode});
             const qint64 currentRequired = requiredByBatch.value(line.batchId);
             if (line.quantity > std::numeric_limits<qint64>::max() - currentRequired) {
                 operationError = error(QStringLiteral("quantity_overflow"),
@@ -295,6 +408,19 @@ Result<bool> LogisticsService::confirm(EntityId id)
                     QStringLiteral("lines[%1].quantity").arg(firstLineByBatch.value(it.key())));
                 return false;
             }
+            if (internalMovement) {
+                const auto targetQuantity = inventory_.quantityResult(it.key(), document.destinationLocationId);
+                if (!targetQuantity.ok()) {
+                    operationError = targetQuantity.error();
+                    return false;
+                }
+                if (targetQuantity.value() > std::numeric_limits<qint64>::max() - it.value()) {
+                    operationError = error(QStringLiteral("quantity_overflow"),
+                        QStringLiteral("接收后的库存数量超出范围"),
+                        QStringLiteral("lines[%1].quantity").arg(firstLineByBatch.value(it.key())));
+                    return false;
+                }
+            }
         }
 
         for (int i = 0; i < document.lines.size(); ++i) {
@@ -302,19 +428,19 @@ Result<bool> LogisticsService::confirm(EntityId id)
             const auto &lineData = confirmedLines.at(i);
             const auto snapshot = documents_.updateLogisticsLineSnapshots(
                 line.id, lineData.batch.batchNo, lineData.category.name,
-                lineData.productType.typeCode);
+                lineData.productType.typeCode, lineData.modelCode);
             if (!snapshot.ok()) {
                 operationError = snapshot.error();
                 return false;
             }
-            const auto outgoing = inventory_.insertEntry(
+            const auto entry = inventory_.insertEntry(
                 line.batchId, document.sourceLocationId, QStringLiteral("Logistics"), id,
                 line.id, -line.quantity, document.businessAt);
-            if (!outgoing.ok()) {
-                operationError = outgoing.error();
+            if (!entry.ok()) {
+                operationError = entry.error();
                 return false;
             }
-            if (document.type == DocumentType::Transfer) {
+            if (internalMovement) {
                 const auto incoming = inventory_.insertEntry(
                     line.batchId, document.destinationLocationId, QStringLiteral("Logistics"), id,
                     line.id, line.quantity, document.businessAt);
@@ -325,7 +451,8 @@ Result<bool> LogisticsService::confirm(EntityId id)
             }
         }
         const auto confirmed = documents_.confirmLogistics(
-            id, source.value().name, destination.value().name, QDateTime::currentDateTimeUtc());
+            id, source.value().name, destination.value().name, QDateTime::currentDateTimeUtc(),
+            outboundConfirmedByName);
         if (!confirmed.ok()) {
             operationError = confirmed.error();
             return false;
@@ -343,6 +470,18 @@ Result<bool> LogisticsService::confirm(EntityId id)
 Result<QVector<LogisticsDocument>> LogisticsService::list(DocumentType type) const
 {
     return documents_.logisticsList(type);
+}
+
+Result<QVector<ReturnableLine>> LogisticsService::returnableLines(EntityId factoryLocationId) const
+{
+    const auto factory = masterData_.locationById(factoryLocationId);
+    if (!factory.ok())
+        return Result<QVector<ReturnableLine>>::failure(factory.error());
+    if (!factory.value().enabled || factory.value().type != LocationType::Factory ||
+        !factory.value().countsAsInventory)
+        return Result<QVector<ReturnableLine>>::failure(error(QStringLiteral("invalid_master_data"),
+            QStringLiteral("退回来源必须是已启用且计库存的工厂"), QStringLiteral("sourceLocationId")));
+    return documents_.returnableLines(factoryLocationId);
 }
 
 Result<bool> LogisticsService::deleteDraft(EntityId id)
@@ -364,7 +503,7 @@ Result<EntityId> LogisticsService::copyToDraft(EntityId id)
     copy.businessAt = source.value().businessAt;
     copy.note = source.value().note;
     for (const LogisticsLine &line : source.value().lines)
-        copy.lines.append({line.batchId, line.quantity});
+        copy.lines.append({line.batchId, line.quantity, line.productModelId});
     const ServiceError validation = validateDraft(copy, false);
     if (!validation.code.isEmpty())
         return Result<EntityId>::failure(validation);

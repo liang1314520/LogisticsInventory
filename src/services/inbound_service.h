@@ -19,7 +19,7 @@ public:
     Result<EntityId> copyToDraft(EntityId id);
 
 private:
-    ServiceError validateDraft(const InboundDraft &draft) const;
+    ServiceError validateDraft(const InboundDraft &draft, bool requireNumber = true) const;
 
     Database &database_;
     MasterDataRepository &masterData_;

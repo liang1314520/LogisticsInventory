@@ -22,6 +22,7 @@ private:
     QLabel *factory_ = nullptr;
     QLabel *inbound_ = nullptr;
     QLabel *outbound_ = nullptr;
+    QLabel *returned_ = nullptr;
     QTableWidget *recent_ = nullptr;
     ServiceError lastError_;
 };

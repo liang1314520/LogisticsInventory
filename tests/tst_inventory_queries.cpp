@@ -35,7 +35,7 @@ void InventoryQueriesTest::seed(Database &db)
     QVERIFY(run(db, "INSERT INTO inbound_batches VALUES(1,'B820',1,820,1,'2026-09-01T08:00:00','Confirmed','','设备','NEW','旧公司','2026-09-01T07:00:00','2026-09-01T08:01:00',NULL)"));
     QVERIFY(run(db, "INSERT INTO inventory_entries VALUES(1,1,1,'Inbound',1,NULL,820,'2026-09-01T08:00:00','2026-09-01T08:01:00',NULL)"));
     QVERIFY(run(db, "INSERT INTO logistics_documents VALUES(1,'T-A','Transfer',1,2,'2026-09-02T09:00:00','Confirmed','','旧公司','甲厂快照','2026-09-02T08:00:00','2026-09-02T09:01:00',NULL),(2,'T-B','Transfer',1,3,'2026-09-02T10:00:00','Confirmed','','旧公司','乙厂快照','2026-09-02T08:30:00','2026-09-02T10:01:00',NULL),(3,'O-A','Outbound',2,4,'2026-09-03T10:00:00','Confirmed','','甲厂快照','客户快照','2026-09-03T09:00:00','2026-09-03T10:01:00',NULL),(4,'O-B','Outbound',3,4,'2026-09-04T10:00:00','Confirmed','','乙厂快照','客户快照','2026-09-04T09:00:00','2026-09-04T10:01:00',NULL),(5,'O-X','Outbound',3,4,'2026-09-05T10:00:00','Cancelled','','乙厂快照','客户快照','2026-09-05T09:00:00','2026-09-05T10:01:00','2026-09-06T10:00:00')"));
-    QVERIFY(run(db, "INSERT INTO logistics_document_lines VALUES(1,1,1,500,'B820','设备','NEW'),(2,2,1,320,'B820','设备','NEW'),(3,3,1,250,'B820','设备','NEW'),(4,4,1,100,'B820','设备','NEW'),(5,5,1,20,'B820','设备','NEW')"));
+    QVERIFY(run(db, "INSERT INTO logistics_document_lines(id,document_id,batch_id,quantity,batch_no_snapshot,category_name_snapshot,type_code_snapshot) VALUES(1,1,1,500,'B820','设备','NEW'),(2,2,1,320,'B820','设备','NEW'),(3,3,1,250,'B820','设备','NEW'),(4,4,1,100,'B820','设备','NEW'),(5,5,1,20,'B820','设备','NEW')"));
     QVERIFY(run(db, "INSERT INTO inventory_entries VALUES(2,1,1,'Logistics',1,1,-500,'2026-09-02T09:00:00','2026-09-02T09:01:00',NULL),(3,1,2,'Logistics',1,1,500,'2026-09-02T09:00:00','2026-09-02T09:01:01',NULL),(4,1,1,'Logistics',2,2,-320,'2026-09-02T10:00:00','2026-09-02T10:01:00',NULL),(5,1,3,'Logistics',2,2,320,'2026-09-02T10:00:00','2026-09-02T10:01:01',NULL),(6,1,2,'Logistics',3,3,-250,'2026-09-03T10:00:00','2026-09-03T10:01:00',NULL),(7,1,3,'Logistics',4,4,-100,'2026-09-04T10:00:00','2026-09-04T10:01:00',NULL),(8,1,3,'Logistics',5,5,-20,'2026-09-05T10:00:00','2026-09-05T10:01:00',NULL),(9,1,3,'Logistics',5,5,20,'2026-09-05T10:00:00','2026-09-06T10:00:00',8)"));
 }
 
@@ -59,7 +59,7 @@ void InventoryQueriesTest::batchBalancesExcludeNaturallyZeroBatch()
     TestDatabase db; QVERIFY(db.openAndMigrate()); seed(db.database());
     QVERIFY(run(db.database(), "INSERT INTO inbound_batches VALUES(2,'B-ZERO',1,10,1,'2026-09-06T08:00:00','Confirmed','','设备','ZERO','旧公司','2026-09-06T07:00:00','2026-09-06T08:01:00',NULL)"));
     QVERIFY(run(db.database(), "INSERT INTO logistics_documents VALUES(6,'O-ZERO','Outbound',1,4,'2026-09-07T08:00:00','Confirmed','','旧公司','客户快照','2026-09-07T07:00:00','2026-09-07T08:01:00',NULL)"));
-    QVERIFY(run(db.database(), "INSERT INTO logistics_document_lines VALUES(6,6,2,10,'B-ZERO','设备','ZERO')"));
+    QVERIFY(run(db.database(), "INSERT INTO logistics_document_lines(id,document_id,batch_id,quantity,batch_no_snapshot,category_name_snapshot,type_code_snapshot) VALUES(6,6,2,10,'B-ZERO','设备','ZERO')"));
     QVERIFY(run(db.database(), "INSERT INTO inventory_entries VALUES(10,2,1,'Inbound',2,NULL,10,'2026-09-06T08:00:00','2026-09-06T08:01:00',NULL),(11,2,1,'Logistics',6,6,-10,'2026-09-07T08:00:00','2026-09-07T08:01:00',NULL)"));
     InventoryQueryService service(db.database());
     const auto batches=service.batchBalances(); QVERIFY(batches.ok());
@@ -72,7 +72,7 @@ void InventoryQueriesTest::cancelledTransferReversalsUseEntryLocationsForSnapsho
 {
     TestDatabase db; QVERIFY(db.openAndMigrate()); seed(db.database());
     QVERIFY(run(db.database(), "INSERT INTO logistics_documents VALUES(6,'T-X','Transfer',2,3,'2026-09-07T10:00:00','Cancelled','','甲厂冲销快照','乙厂冲销快照','2026-09-07T09:00:00','2026-09-07T10:01:00','2026-09-08T10:00:00')"));
-    QVERIFY(run(db.database(), "INSERT INTO logistics_document_lines VALUES(6,6,1,10,'B820','设备','NEW')"));
+    QVERIFY(run(db.database(), "INSERT INTO logistics_document_lines(id,document_id,batch_id,quantity,batch_no_snapshot,category_name_snapshot,type_code_snapshot) VALUES(6,6,1,10,'B820','设备','NEW')"));
     QVERIFY(run(db.database(), "INSERT INTO inventory_entries VALUES(10,1,2,'Logistics',6,6,-10,'2026-09-07T10:00:00','2026-09-07T10:01:00',NULL),(11,1,3,'Logistics',6,6,10,'2026-09-07T10:00:00','2026-09-07T10:01:01',NULL),(12,1,2,'Logistics',6,6,10,'2026-09-07T10:00:00','2026-09-08T10:00:00',10),(13,1,3,'Logistics',6,6,-10,'2026-09-07T10:00:00','2026-09-08T10:00:01',11)"));
     InventoryQueryService service(db.database());
     const auto timeline=service.batchTimeline(1); QVERIFY(timeline.ok()); QCOMPARE(timeline.value().size(),13);

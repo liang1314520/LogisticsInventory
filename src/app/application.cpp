@@ -8,6 +8,7 @@
 #include "services/inventory_query_service.h"
 #include "services/logistics_service.h"
 #include "services/master_data_service.h"
+#include "services/batch_workflow_service.h"
 #include "ui/main_window.h"
 
 #include <QCoreApplication>
@@ -37,7 +38,10 @@ bool Application::initialize(QString *error)
     logisticsService_ = std::make_unique<LogisticsService>(*database_, *masterRepository_,
         *documentRepository_, *inventoryRepository_);
     queryService_ = std::make_unique<InventoryQueryService>(*database_);
-    mainWindow_ = std::make_unique<MainWindow>(*masterService_, *queryService_, *inboundService_, *logisticsService_);
+    workflowService_ = std::make_unique<BatchWorkflowService>(*masterService_,
+        *documentRepository_, *inventoryRepository_, *queryService_);
+    mainWindow_ = std::make_unique<MainWindow>(*masterService_, *queryService_, *inboundService_,
+                                               *logisticsService_, *workflowService_);
     return true;
 }
 

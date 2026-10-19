@@ -11,6 +11,17 @@
 struct LogisticsLineDraft {
     EntityId batchId = 0;
     qint64 quantity = 0;
+    EntityId productModelId = 0;
+};
+
+struct ReturnableLine {
+    EntityId batchId = 0;
+    EntityId productTypeId = 0;
+    EntityId productModelId = 0;
+    QString batchNo;
+    QString modelCode;
+    qint64 quantity = 0;
+    QString materialModel;
 };
 
 struct LogisticsDraft {
@@ -21,6 +32,7 @@ struct LogisticsDraft {
     QDateTime businessAt;
     QString note;
     QList<LogisticsLineDraft> lines;
+    EntityId outboundConfirmedById = 0;
 };
 
 struct LogisticsLine : LogisticsLineDraft {
@@ -29,6 +41,8 @@ struct LogisticsLine : LogisticsLineDraft {
     QString batchNoSnapshot;
     QString categoryNameSnapshot;
     QString typeCodeSnapshot;
+    QString modelCodeSnapshot;
+    QString materialModel;
 };
 
 struct LogisticsDocument {
@@ -46,6 +60,8 @@ struct LogisticsDocument {
     QDateTime createdAt;
     QDateTime confirmedAt;
     QDateTime cancelledAt;
+    EntityId outboundConfirmedById = 0;
+    QString outboundConfirmedByName;
 };
 
 struct InboundDraft {
@@ -55,6 +71,8 @@ struct InboundDraft {
     EntityId initialLocationId = 0;
     QDateTime businessAt;
     QString note;
+    QString materialModel;
+    EntityId receivedById = 0;
 };
 
 struct InboundBatch : InboundDraft {
@@ -66,6 +84,7 @@ struct InboundBatch : InboundDraft {
     QDateTime createdAt;
     QDateTime confirmedAt;
     QDateTime cancelledAt;
+    QString receivedByName;
 };
 
 class DocumentRepository {
@@ -79,22 +98,27 @@ public:
     Result<bool> deleteInboundDraft(EntityId id);
     Result<bool> confirmInbound(EntityId id, const QString &categoryName,
                                 const QString &typeCode, const QString &locationName,
-                                const QDateTime &confirmedAt);
+                                const QDateTime &confirmedAt, const QString &receivedByName);
     Result<bool> cancelInbound(EntityId id, const QDateTime &cancelledAt);
 
     Result<EntityId> insertLogisticsDraft(const LogisticsDraft &draft);
     Result<bool> updateLogisticsDraft(EntityId id, const LogisticsDraft &draft);
     Result<LogisticsDocument> logisticsById(EntityId id) const;
     Result<QVector<LogisticsDocument>> logisticsList(DocumentType type) const;
+    Result<QVector<LogisticsDocument>> logisticsForBatch(EntityId batchId) const;
     Result<bool> deleteLogisticsDraft(EntityId id);
+    Result<QVector<ReturnableLine>> returnableLines(EntityId factoryLocationId) const;
     Result<bool> updateLogisticsLineSnapshots(EntityId lineId, const QString &batchNo,
                                               const QString &categoryName,
-                                              const QString &typeCode);
+                                              const QString &typeCode,
+                                              const QString &modelCode);
     Result<bool> confirmLogistics(EntityId id, const QString &sourceName,
                                   const QString &destinationName,
-                                  const QDateTime &confirmedAt);
+                                  const QDateTime &confirmedAt, const QString &outboundConfirmedByName);
     Result<bool> cancelLogistics(EntityId id, const QDateTime &cancelledAt);
 
 private:
+    Result<QString> prepareNumber(const QString &requested, const QString &prefix,
+                                  const QDate &businessDate, EntityId excludedId = 0);
     Database &database_;
 };

@@ -174,7 +174,11 @@ bool Database::migrate(QString *error)
         versionQuery.finish();
         const QStringList resources{
             QStringLiteral(":/migrations/001_initial.sql"),
-            QStringLiteral(":/migrations/002_product_types.sql")
+            QStringLiteral(":/migrations/002_product_types.sql"),
+            QStringLiteral(":/migrations/003_product_models.sql"),
+            QStringLiteral(":/migrations/004_document_number_sequences.sql"),
+            QStringLiteral(":/migrations/005_inbound_material_model.sql"),
+            QStringLiteral(":/migrations/006_document_people.sql")
         };
         if (current > resources.size()) {
             setError(error, QStringLiteral("Database schema version %1 is newer than supported version %2")
@@ -184,7 +188,7 @@ bool Database::migrate(QString *error)
         for (int version = current + 1; version <= resources.size(); ++version) {
             if (!executeMigration(resources.at(version - 1), error))
                 return false;
-            if (version == 2 && !foreignKeyCheck(error))
+            if ((version == 2 || version == 3) && !foreignKeyCheck(error))
                 return false;
             if (!execute(QStringLiteral("INSERT INTO schema_migrations(version) VALUES(%1)").arg(version), error))
                 return false;

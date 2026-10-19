@@ -17,6 +17,10 @@ class InboundPage final : public QWidget {
 public:
     explicit InboundPage(MasterDataService &masterData, InboundService &service, QWidget *parent = nullptr);
     Result<bool> refresh();
+    void setCurrentBatch(EntityId batchId);
+    EntityId currentBatchId() const;
+    Result<bool> selectBatch(EntityId batchId);
+    void setWorkflowMessage(const QString &message);
     ServiceError lastError() const;
     void setConfirmationCallback(std::function<bool(const QString &)> callback);
     Result<bool> openCreateDialog();
@@ -28,6 +32,7 @@ signals:
     void editRequested(EntityId id);
     void viewRequested(EntityId id);
     void dataChanged();
+    void batchSelected(EntityId batchId);
 
 private slots:
     void updateActions();
@@ -46,6 +51,8 @@ private:
     InboundService &service_;
     QTableWidget *table_ = nullptr;
     QLabel *error_ = nullptr;
+    QLabel *workflowContext_ = nullptr;
+    EntityId currentBatchId_ = 0;
     QPushButton *edit_ = nullptr;
     QPushButton *view_ = nullptr;
     QPushButton *remove_ = nullptr;

@@ -9,7 +9,7 @@
 class InventoryQueryService;
 class ReportService;
 class QComboBox;
-class QDateEdit;
+class DateTimeInput;
 class QLabel;
 
 class ReportsPage final : public QWidget {
@@ -26,8 +26,8 @@ private:
     InventoryQueryService &queries_;
     ReportService &reports_;
     QComboBox *report_=nullptr;
-    QDateEdit *from_=nullptr;
-    QDateEdit *to_=nullptr;
+    DateTimeInput *from_=nullptr;
+    DateTimeInput *to_=nullptr;
     QLabel *error_=nullptr;
     SavePathCallback savePath_;
 };
