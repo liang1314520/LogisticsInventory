@@ -78,7 +78,15 @@ add_library(logistics_ui
 target_include_directories(logistics_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(logistics_ui PUBLIC logistics_master_data Qt6::Widgets)
 
-add_executable(LogisticsInventory WIN32 src/app/main.cpp)
+add_executable(LogisticsInventory WIN32
+    src/app/main.cpp
+    src/app/resources/app.qrc
+)
+if(WIN32)
+    enable_language(RC)
+    target_sources(LogisticsInventory PRIVATE src/app/resources/app.rc)
+    target_include_directories(LogisticsInventory PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/app/resources)
+endif()
 target_link_libraries(LogisticsInventory PRIVATE logistics_ui)
 
 install(TARGETS LogisticsInventory RUNTIME DESTINATION .)
