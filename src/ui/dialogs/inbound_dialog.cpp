@@ -61,7 +61,7 @@ InboundDialog::InboundDialog(MasterDataService &masterData, InboundService &serv
     businessAt_->setObjectName(QStringLiteral("businessAt"));
     receivedBy_ = new QComboBox(this);
     receivedBy_->setObjectName(QStringLiteral("receivedById"));
-    receivedBy_->setToolTip(QStringLiteral("确认入库前必选；请先在基础资料的人员名单中录入姓名"));
+    receivedBy_->setToolTip(QStringLiteral("保存前必选；请先在基础资料的人员名单中录入姓名"));
     note_ = new QTextEdit(this);
     note_->setObjectName(QStringLiteral("note"));
 
@@ -74,6 +74,10 @@ InboundDialog::InboundDialog(MasterDataService &masterData, InboundService &serv
     form->addRow(QStringLiteral("入库签收人"), receivedBy_);
     form->addRow(QStringLiteral("备注"), note_);
     layout->addLayout(form);
+    saveHint_ = new QLabel(this);
+    saveHint_->setObjectName(QStringLiteral("saveHint"));
+    saveHint_->setWordWrap(true);
+    layout->addWidget(saveHint_);
 
     error_ = new QLabel(this);
     error_->setObjectName(QStringLiteral("errorLabel"));
@@ -177,19 +181,18 @@ Result<bool> InboundDialog::initialize(EntityId id, bool readOnly)
         for (const auto &person : people.value())
             receivedBy_->addItem(person.name, person.id);
     }
-    InboundDraft value;
+    InboundInput value;
     if (id) {
         const auto loaded = service_.byId(id);
         if (!loaded.ok()) {
             showError(loaded.error());
             return Result<bool>::failure(loaded.error());
         }
-        if (!readOnly && loaded.value().status != DocumentStatus::Draft) {
-            const ServiceError status{QStringLiteral("invalid_status"),
-                                      QStringLiteral("仅草稿可编辑"), QStringLiteral("status")};
-            showError(status);
-            return Result<bool>::failure(status);
-        }
+        const bool cancelled = loaded.value().status == DocumentStatus::Cancelled;
+        save_->setText(cancelled ? QStringLiteral("保存并恢复生效") : QStringLiteral("保存修改"));
+        saveHint_->setText(cancelled
+            ? QStringLiteral("此记录已作废，保存修改后将恢复生效并重新计入库存。")
+            : QStringLiteral("保存将更新原记录及其库存影响，不新增批次。"));
         value = loaded.value();
         if (readOnly_) {
             receivedBy_->addItem(loaded.value().receivedByName.isEmpty()
@@ -200,8 +203,10 @@ Result<bool> InboundDialog::initialize(EntityId id, bool readOnly)
         const auto choices = loadChoices(value.productTypeId, value.initialLocationId);
         if (!choices.ok())
             return choices;
-        setDraft(value);
+        setInput(value);
     } else {
+        save_->setText(QStringLiteral("保存"));
+        saveHint_->setText(QStringLiteral("保存后立即生效并计入库存。"));
         const auto choices = loadChoices();
         if (!choices.ok())
             return choices;
@@ -219,11 +224,12 @@ Result<bool> InboundDialog::initialize(EntityId id, bool readOnly)
     for (QWidget *widget : controls)
         widget->setEnabled(!readOnly_);
     save_->setVisible(!readOnly_);
+    saveHint_->setVisible(!readOnly_);
     updateContentSize();
     return Result<bool>::success(true);
 }
 
-void InboundDialog::setDraft(const InboundDraft &value)
+void InboundDialog::setInput(const InboundInput &value)
 {
     manualNumber_->setChecked(!value.batchNo.trimmed().isEmpty());
     batchNo_->setText(value.batchNo);
@@ -242,7 +248,7 @@ void InboundDialog::setDraft(const InboundDraft &value)
     updateContentSize();
 }
 
-InboundDraft InboundDialog::draft() const
+InboundInput InboundDialog::input() const
 {
     bool ok = false;
     const qint64 quantity = quantity_->text().toLongLong(&ok);
@@ -259,9 +265,9 @@ bool InboundDialog::save()
         return false;
     }
     const auto result = id_
-        ? service_.updateDraft(id_, draft())
+        ? service_.update(id_, input())
         : [&] {
-              const auto created = service_.createDraft(draft());
+              const auto created = service_.create(input());
               return created.ok() ? Result<bool>::success(true)
                                   : Result<bool>::failure(created.error());
           }();

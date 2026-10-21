@@ -74,7 +74,7 @@ WorkflowBar::WorkflowBar(BatchWorkflowService &service, QWidget *parent)
     layout->addWidget(message_);
 
     auto *actions = new QHBoxLayout;
-    next_ = new QPushButton(QStringLiteral("去下一步"), this);
+    next_ = new QPushButton(QStringLiteral("查看建议步骤"), this);
     next_->setObjectName(QStringLiteral("workflowNextButton"));
     tracking_ = new QPushButton(QStringLiteral("查看批次追踪"), this);
     tracking_->setObjectName(QStringLiteral("workflowTrackingButton"));
@@ -115,7 +115,7 @@ Result<bool> WorkflowBar::refresh()
         const QSignalBlocker blocker(selector_);
         selector_->clear();
         for (const auto &option : options.value()) {
-            selector_->addItem(QStringLiteral("%1 / %2 / 物料型号：%3 / %4")
+            selector_->addItem(QStringLiteral("%1 / %2 / 物料型号：%3 / 账面库存 %4")
                                    .arg(option.batchNo, option.productTypeName,
                                         option.materialModel.isEmpty() ? QStringLiteral("未填写")
                                                                        : option.materialModel)

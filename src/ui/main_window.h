@@ -69,6 +69,7 @@ private:
     ReportsPage *reports_ = nullptr;
     MasterDataPage *masterData_ = nullptr;
     BatchWorkflowService &workflowService_;
+    InventoryQueryService &queries_;
     WorkflowBar *workflowBar_ = nullptr;
     EntityId currentBatchId_ = 0;
 };

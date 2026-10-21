@@ -8,34 +8,24 @@
 #include <QList>
 #include <QVector>
 
-struct LogisticsLineDraft {
+struct LogisticsLineInput {
     EntityId batchId = 0;
     qint64 quantity = 0;
     EntityId productModelId = 0;
 };
 
-struct ReturnableLine {
-    EntityId batchId = 0;
-    EntityId productTypeId = 0;
-    EntityId productModelId = 0;
-    QString batchNo;
-    QString modelCode;
-    qint64 quantity = 0;
-    QString materialModel;
-};
-
-struct LogisticsDraft {
+struct LogisticsInput {
     QString documentNo;
     DocumentType type = DocumentType::Transfer;
     EntityId sourceLocationId = 0;
     EntityId destinationLocationId = 0;
     QDateTime businessAt;
     QString note;
-    QList<LogisticsLineDraft> lines;
+    QList<LogisticsLineInput> lines;
     EntityId outboundConfirmedById = 0;
 };
 
-struct LogisticsLine : LogisticsLineDraft {
+struct LogisticsLine : LogisticsLineInput {
     EntityId id = 0;
     EntityId productTypeId = 0;
     QString batchNoSnapshot;
@@ -54,7 +44,7 @@ struct LogisticsDocument {
     QDateTime businessAt;
     QString note;
     QList<LogisticsLine> lines;
-    DocumentStatus status = DocumentStatus::Draft;
+    DocumentStatus status = DocumentStatus::Confirmed;
     QString sourceNameSnapshot;
     QString destinationNameSnapshot;
     QDateTime createdAt;
@@ -64,7 +54,7 @@ struct LogisticsDocument {
     QString outboundConfirmedByName;
 };
 
-struct InboundDraft {
+struct InboundInput {
     QString batchNo;
     EntityId productTypeId = 0;
     qint64 quantity = 0;
@@ -75,9 +65,9 @@ struct InboundDraft {
     EntityId receivedById = 0;
 };
 
-struct InboundBatch : InboundDraft {
+struct InboundBatch : InboundInput {
     EntityId id = 0;
-    DocumentStatus status = DocumentStatus::Draft;
+    DocumentStatus status = DocumentStatus::Confirmed;
     QString categoryNameSnapshot;
     QString typeCodeSnapshot;
     QString locationNameSnapshot;
@@ -91,33 +81,22 @@ class DocumentRepository {
 public:
     explicit DocumentRepository(Database &database);
 
-    Result<EntityId> insertInboundDraft(const InboundDraft &draft);
-    Result<bool> updateInboundDraft(EntityId id, const InboundDraft &draft);
+    Result<EntityId> insertInbound(const InboundBatch &batch);
+    Result<bool> updateInbound(const InboundBatch &batch);
     Result<InboundBatch> inboundById(EntityId id) const;
     Result<QVector<InboundBatch>> inboundList() const;
-    Result<bool> deleteInboundDraft(EntityId id);
-    Result<bool> confirmInbound(EntityId id, const QString &categoryName,
-                                const QString &typeCode, const QString &locationName,
-                                const QDateTime &confirmedAt, const QString &receivedByName);
+    Result<bool> updateBatchSnapshots(EntityId batchId);
     Result<bool> cancelInbound(EntityId id, const QDateTime &cancelledAt);
 
-    Result<EntityId> insertLogisticsDraft(const LogisticsDraft &draft);
-    Result<bool> updateLogisticsDraft(EntityId id, const LogisticsDraft &draft);
+    Result<EntityId> insertLogistics(const LogisticsDocument &document);
+    Result<bool> updateLogistics(const LogisticsDocument &document);
     Result<LogisticsDocument> logisticsById(EntityId id) const;
     Result<QVector<LogisticsDocument>> logisticsList(DocumentType type) const;
     Result<QVector<LogisticsDocument>> logisticsForBatch(EntityId batchId) const;
-    Result<bool> deleteLogisticsDraft(EntityId id);
-    Result<QVector<ReturnableLine>> returnableLines(EntityId factoryLocationId) const;
-    Result<bool> updateLogisticsLineSnapshots(EntityId lineId, const QString &batchNo,
-                                              const QString &categoryName,
-                                              const QString &typeCode,
-                                              const QString &modelCode);
-    Result<bool> confirmLogistics(EntityId id, const QString &sourceName,
-                                  const QString &destinationName,
-                                  const QDateTime &confirmedAt, const QString &outboundConfirmedByName);
     Result<bool> cancelLogistics(EntityId id, const QDateTime &cancelledAt);
 
 private:
+    Result<bool> insertLogisticsLines(EntityId documentId, const QList<LogisticsLine> &lines);
     Result<QString> prepareNumber(const QString &requested, const QString &prefix,
                                   const QDate &businessDate, EntityId excludedId = 0);
     Database &database_;

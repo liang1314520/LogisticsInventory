@@ -37,6 +37,7 @@ public:
                                        EntityId reversalOfEntryId = 0);
     Result<QVector<InventoryEntry>> unreversedEntriesForSource(
         const QString &sourceType, EntityId sourceId) const;
+    Result<bool> removeEntriesForSource(const QString &sourceType, EntityId sourceId);
 
 private:
     Database &database_;

@@ -7,13 +7,13 @@ CREATE TABLE locations(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, type T
 CREATE TABLE inbound_batches(
  id INTEGER PRIMARY KEY, batch_no TEXT UNIQUE, material_id INTEGER NOT NULL REFERENCES materials(id),
  quantity INTEGER NOT NULL CHECK(quantity > 0), initial_location_id INTEGER NOT NULL REFERENCES locations(id),
- business_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft','Confirmed','Cancelled')),
+ business_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Confirmed' CHECK(status IN ('Confirmed','Cancelled')),
  note TEXT NOT NULL DEFAULT '', material_name_snapshot TEXT, model_code_snapshot TEXT, location_name_snapshot TEXT,
  created_at TEXT NOT NULL, confirmed_at TEXT, cancelled_at TEXT);
 CREATE TABLE logistics_documents(
  id INTEGER PRIMARY KEY, document_no TEXT UNIQUE, type TEXT NOT NULL CHECK(type IN ('Transfer','Outbound')),
  source_location_id INTEGER NOT NULL REFERENCES locations(id), destination_location_id INTEGER NOT NULL REFERENCES locations(id),
- business_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft','Confirmed','Cancelled')),
+ business_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Confirmed' CHECK(status IN ('Confirmed','Cancelled')),
  note TEXT NOT NULL DEFAULT '', source_name_snapshot TEXT, destination_name_snapshot TEXT,
  created_at TEXT NOT NULL, confirmed_at TEXT, cancelled_at TEXT, CHECK(source_location_id <> destination_location_id));
 CREATE TABLE logistics_document_lines(

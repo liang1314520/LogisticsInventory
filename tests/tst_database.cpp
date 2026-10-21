@@ -124,8 +124,8 @@ private slots:
     void enforcesCheckConstraints();
     void rejectsNonPositiveInboundQuantity();
     void rejectsNonPositiveLogisticsLineQuantity();
-    void logisticsSchemaSupportsSnapshotsAndNullDraftNumbers();
-    void inboundSchemaSupportsNullDraftNumbers();
+    void logisticsSchemaSupportsSnapshotsAndNullableNumbers();
+    void inboundSchemaSupportsNullableNumbers();
     void rejectsZeroInventoryDelta();
     void enforcesUniqueConstraints();
     void migratesV1DataToProductTypes();
@@ -137,7 +137,7 @@ void DatabaseTest::migratesEmptyDatabase()
 {
     TestDatabase db;
     QVERIFY(db.openAndMigrate());
-    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(3));
+    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(6));
     QCOMPARE(db.scalar("PRAGMA foreign_keys"), QVariant(1));
     QVERIFY(db.tableExists("inventory_entries"));
     QVERIFY(db.tableExists("product_models"));
@@ -231,7 +231,7 @@ void DatabaseTest::rejectsNonPositiveLogisticsLineQuantity()
     }
 }
 
-void DatabaseTest::logisticsSchemaSupportsSnapshotsAndNullDraftNumbers()
+void DatabaseTest::logisticsSchemaSupportsSnapshotsAndNullableNumbers()
 {
     TestDatabase db;
     QVERIFY(db.openAndMigrate());
@@ -263,13 +263,15 @@ void DatabaseTest::logisticsSchemaSupportsSnapshotsAndNullDraftNumbers()
     }
     QCOMPARE(db.scalar("SELECT COUNT(*) FROM logistics_documents WHERE document_no IS NULL"),
              QVariant(2));
+    QCOMPARE(db.scalar("SELECT status FROM logistics_documents WHERE id=1"), QVariant("Confirmed"));
+    QVERIFY(!db.execute("UPDATE logistics_documents SET status='Invalid' WHERE id=1"));
     QVERIFY(db.execute(
         "UPDATE logistics_documents SET document_no='L-UNIQUE' WHERE id=1"));
     QVERIFY(!db.execute(
         "UPDATE logistics_documents SET document_no='L-UNIQUE' WHERE id=2"));
 }
 
-void DatabaseTest::inboundSchemaSupportsNullDraftNumbers()
+void DatabaseTest::inboundSchemaSupportsNullableNumbers()
 {
     TestDatabase db;
     QVERIFY(db.openAndMigrate());
@@ -292,6 +294,8 @@ void DatabaseTest::inboundSchemaSupportsNullDraftNumbers()
     }
     QCOMPARE(db.scalar("SELECT COUNT(*) FROM inbound_batches WHERE batch_no IS NULL"),
              QVariant(2));
+    QCOMPARE(db.scalar("SELECT status FROM inbound_batches WHERE id=1"), QVariant("Confirmed"));
+    QVERIFY(!db.execute("UPDATE inbound_batches SET status='Invalid' WHERE id=1"));
     QVERIFY(db.execute("UPDATE inbound_batches SET batch_no='B-UNIQUE' WHERE id=1"));
     QVERIFY(!db.execute("UPDATE inbound_batches SET batch_no='B-UNIQUE' WHERE id=2"));
 }
@@ -327,7 +331,7 @@ void DatabaseTest::migratesV1DataToProductTypes()
     const NumericSnapshot oldDocumentQuantities = documentQuantitySnapshot(db);
 
     QVERIFY(db.migrate());
-    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(3));
+    QCOMPARE(db.scalar("SELECT MAX(version) FROM schema_migrations"), QVariant(6));
     QCOMPARE(db.scalar("SELECT type_code FROM product_types WHERE id=1"), QVariant("F25"));
     QCOMPARE(db.scalar("SELECT category_name_snapshot FROM inbound_batches WHERE id=1"),
              QVariant("保险箱分类"));
@@ -407,7 +411,7 @@ void DatabaseTest::migratesV2HistoryToModelsAndRollsBackOnFailure()
     QVERIFY(!db.execute(QStringLiteral("INSERT INTO logistics_document_lines(document_id,batch_id,product_model_id,quantity) VALUES(1,1,1,1)")));
     QVERIFY(!db.execute(QStringLiteral("INSERT INTO logistics_document_lines(document_id,batch_id,quantity) VALUES(1,1,1)")));
     QVERIFY(db.migrate());
-    QCOMPARE(db.scalar(QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 3);
+    QCOMPARE(db.scalar(QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 6);
 }
 
 QTEST_MAIN(DatabaseTest)

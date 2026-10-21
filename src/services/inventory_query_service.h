@@ -40,6 +40,14 @@ struct BatchLocationBalance {
     qint64 quantity = 0;
 };
 
+struct NegativeBalance {
+    EntityId batchId = 0;
+    EntityId locationId = 0;
+    QString batchNo;
+    QString locationName;
+    qint64 quantity = 0;
+};
+
 struct BatchTimelineItem {
     EntityId id = 0;
     QString sourceDocument;
@@ -52,7 +60,7 @@ struct BatchTimelineItem {
     QString categoryName;
     QString typeCode;
     QString modelCode;
-    DocumentStatus documentStatus = DocumentStatus::Draft;
+    DocumentStatus documentStatus = DocumentStatus::Confirmed;
     bool isReversal = false;
     QString materialModel;
 };
@@ -89,6 +97,7 @@ struct DashboardSummary {
     qint64 monthlyInbound = 0;
     qint64 monthlyOutbound = 0;
     qint64 monthlyReturned = 0;
+    qint64 negativeBalanceCount = 0;
     QVector<BusinessRecord> recentRecords;
 };
 
@@ -101,6 +110,8 @@ public:
     Result<QVector<BatchBalance>> batchBalances() const;
     Result<QVector<BatchBalance>> historicalBatches() const;
     Result<QVector<LocationBalance>> locationBalances() const;
+    Result<qint64> negativeBalanceCount() const;
+    Result<QVector<NegativeBalance>> negativeBalances() const;
     Result<QVector<BatchLocationBalance>> batchLocationBalances(EntityId batchId) const;
     Result<QVector<BatchTimelineItem>> batchTimeline(EntityId batchId) const;
     Result<DashboardSummary> dashboardSummary(const QDate &month) const;

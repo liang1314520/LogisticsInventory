@@ -31,6 +31,7 @@ private:
     std::unique_ptr<TestDatabase> db;
     std::unique_ptr<MasterDataRepository> repository;
     std::unique_ptr<MasterDataService> service;
+    EntityId personId = 0;
 };
 
 void MasterDataServiceTest::init()
@@ -39,6 +40,9 @@ void MasterDataServiceTest::init()
     QVERIFY(db->openAndMigrate());
     repository = std::make_unique<MasterDataRepository>(db->database());
     service = std::make_unique<MasterDataService>(*repository);
+    const auto person = service->createPersonnel(QStringLiteral("经办人"));
+    QVERIFY(person.ok());
+    personId = person.value().id;
 }
 
 void MasterDataServiceTest::disabledDataIsExcludedFromNewDocuments()
@@ -198,8 +202,11 @@ void MasterDataServiceTest::reportsReferenceCountsForUsedMasterData()
     QVERIFY(type.ok() && location.ok());
 
     DocumentRepository documents(db->database());
-    const auto batch = documents.insertInboundDraft({QStringLiteral("B-1"), type.value().id,
-        100, location.value().id, QDateTime(QDate(2026, 9, 1), QTime(8, 0)), {}});
+    InventoryRepository inventory(db->database());
+    InboundService inbound(db->database(), *repository, documents, inventory);
+    const auto batch = inbound.create({QStringLiteral("B-1"), type.value().id,
+        100, location.value().id, QDateTime(QDate(2026, 9, 1), QTime(8, 0)), {},
+        QStringLiteral("V40"), personId});
     QVERIFY(batch.ok());
 
     const auto typeRefs = service->productTypeReferenceCount(type.value().id);
@@ -234,20 +241,17 @@ void MasterDataServiceTest::deleteCascadeRemovesDependentDocumentsAndEntries()
     InboundService inbound(db->database(), *repository, documents, inventory);
     LogisticsService logistics(db->database(), *repository, documents, inventory);
 
-    const auto target = inbound.createDraft({QStringLiteral("B-TARGET"), type.value().id, 100,
-        source.value().id, QDateTime(QDate(2026, 9, 1), QTime(8, 0)), {}});
-    const auto keep = inbound.createDraft({QStringLiteral("B-KEEP"), other.value().id, 50,
-        source.value().id, QDateTime(QDate(2026, 9, 1), QTime(8, 0)), {}});
+    const auto target = inbound.create({QStringLiteral("B-TARGET"), type.value().id, 100,
+        source.value().id, QDateTime(QDate(2026, 9, 1), QTime(8, 0)), {}, QStringLiteral("V40"), personId});
+    const auto keep = inbound.create({QStringLiteral("B-KEEP"), other.value().id, 50,
+        source.value().id, QDateTime(QDate(2026, 9, 1), QTime(8, 0)), {}, QStringLiteral("V40"), personId});
     QVERIFY(target.ok() && keep.ok());
-    QVERIFY(inbound.confirm(target.value()).ok());
-    QVERIFY(inbound.confirm(keep.value()).ok());
 
     // 同一张调拨单混合两个批次：一个待删，一个保留。
-    const auto mixed = logistics.createDraft({QStringLiteral("T-MIX"), DocumentType::Transfer,
+    const auto mixed = logistics.create({QStringLiteral("T-MIX"), DocumentType::Transfer,
         source.value().id, destination.value().id, QDateTime(QDate(2026, 9, 2), QTime(9, 0)), {},
         {{target.value(), 40}, {keep.value(), 10}}});
     QVERIFY(mixed.ok());
-    QVERIFY(logistics.confirm(mixed.value()).ok());
 
     QVERIFY(service->deleteProductType(type.value().id).ok());
 
@@ -328,26 +332,24 @@ void MasterDataServiceTest::deletingModelCascadesDocumentsAndReturns()
     const auto f25 = service->createProductModel(type.value().id, QStringLiteral("F25"), {});
     const auto p25 = service->createProductModel(type.value().id, QStringLiteral("P25"), {});
     const auto warehouse = service->createLocation(QStringLiteral("仓库"), LocationType::Company, true);
-    const auto factory = service->createLocation(QStringLiteral("外部工厂"), LocationType::Factory, false);
-    QVERIFY(f25.ok() && p25.ok() && warehouse.ok() && factory.ok());
+    const auto factory = service->createLocation(QStringLiteral("工厂"), LocationType::Factory, true);
+    const auto amazon = service->createLocation(QStringLiteral("Amazon"), LocationType::Other, false);
+    QVERIFY(f25.ok() && p25.ok() && warehouse.ok() && factory.ok() && amazon.ok());
     DocumentRepository documents(db->database());
     InventoryRepository inventory(db->database());
     InboundService inbound(db->database(), *repository, documents, inventory);
     LogisticsService logistics(db->database(), *repository, documents, inventory);
     const auto at = QDateTime::currentDateTime();
-    const auto batch = inbound.createDraft({QStringLiteral("B-1"), type.value().id, 100,
-                                            warehouse.value().id, at, {}});
+    const auto batch = inbound.create({QStringLiteral("B-1"), type.value().id, 100,
+        warehouse.value().id, at, {}, QStringLiteral("V40"), personId});
     QVERIFY(batch.ok());
-    QVERIFY(inbound.confirm(batch.value()).ok());
-    const auto sent = logistics.createDraft({QStringLiteral("O-MIX"), DocumentType::Outbound,
-        warehouse.value().id, factory.value().id, at, {},
-        {{batch.value(), 50, f25.value().id}, {batch.value(), 50, p25.value().id}}});
+    const auto sent = logistics.create({QStringLiteral("O-MIX"), DocumentType::Outbound,
+        factory.value().id, amazon.value().id, at, {},
+        {{batch.value(), 50, f25.value().id}, {batch.value(), 50, p25.value().id}}, personId});
     QVERIFY(sent.ok());
-    QVERIFY(logistics.confirm(sent.value()).ok());
-    const auto returned = logistics.createDraft({QStringLiteral("R-1"), DocumentType::Return,
+    const auto returned = logistics.create({QStringLiteral("R-1"), DocumentType::Return,
         factory.value().id, warehouse.value().id, at, {}, {{batch.value(), 5, f25.value().id}}});
     QVERIFY(returned.ok());
-    QVERIFY(logistics.confirm(returned.value()).ok());
     QVERIFY(logistics.cancel(returned.value()).ok());
     QVERIFY(service->deleteProductModel(f25.value().id).ok());
     QVERIFY(!documents.logisticsById(sent.value()).ok());

@@ -25,7 +25,7 @@ InboundPage::InboundPage(MasterDataService &masterData, InboundService &service,
     workflowContext_ = new QLabel(this);
     workflowContext_->setObjectName(QStringLiteral("workflowContext"));
     workflowContext_->setWordWrap(true);
-    workflowContext_->setText(QStringLiteral("步骤 02 / 06：公司入库\n前置：准备产品名称和公司库存库位\n当前操作：新建并确认公司入库\n下一步：调拨到工厂，再从工厂出库到 Amazon"));
+    workflowContext_->setText(QStringLiteral("步骤 02 / 06：公司入库\n前置：准备产品名称和公司库存库位\n当前操作：新建公司入库，保存即生效\n下一步：调拨到工厂，再从工厂出库到 Amazon"));
     layout->addWidget(workflowContext_);
     const auto button = [this, actions](const QString &text, const QString &name) {
         auto *value = new QPushButton(text, this); value->setObjectName(name); actions->addWidget(value); return value;
@@ -33,14 +33,11 @@ InboundPage::InboundPage(MasterDataService &masterData, InboundService &service,
     auto *create = button(QStringLiteral("新建"), QStringLiteral("createButton"));
     edit_ = button(QStringLiteral("编辑"), QStringLiteral("editButton"));
     view_ = button(QStringLiteral("查看"), QStringLiteral("viewButton"));
-    remove_ = button(QStringLiteral("删除"), QStringLiteral("deleteButton"));
-    confirm_ = button(QStringLiteral("确认"), QStringLiteral("confirmButton"));
-    cancel_ = button(QStringLiteral("取消确认"), QStringLiteral("cancelButton"));
-    copy_ = button(QStringLiteral("复制为草稿"), QStringLiteral("copyButton"));
+    cancel_ = button(QStringLiteral("作废"), QStringLiteral("cancelButton"));
     layout->addLayout(actions);
-    table_ = new QTableWidget(0, 7, this); table_->setObjectName(QStringLiteral("documents"));
+    table_ = new QTableWidget(0, 8, this); table_->setObjectName(QStringLiteral("documents"));
     table_->setHorizontalHeaderLabels({QStringLiteral("序号"), QStringLiteral("批次号"),
-        QStringLiteral("业务日期"), QStringLiteral("状态"), QStringLiteral("数量"),
+        QStringLiteral("产品名称"), QStringLiteral("业务日期"), QStringLiteral("状态"), QStringLiteral("数量"),
         QStringLiteral("物料型号"), QStringLiteral("入库签收人")});
     table_->setSelectionBehavior(QAbstractItemView::SelectRows); table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -53,10 +50,7 @@ InboundPage::InboundPage(MasterDataService &masterData, InboundService &service,
     });
     connect(edit_, &QPushButton::clicked, this, &InboundPage::editSelected);
     connect(view_, &QPushButton::clicked, this, &InboundPage::viewSelected);
-    connect(remove_, &QPushButton::clicked, this, &InboundPage::deleteSelected);
-    connect(confirm_, &QPushButton::clicked, this, &InboundPage::confirmSelected);
     connect(cancel_, &QPushButton::clicked, this, &InboundPage::cancelSelected);
-    connect(copy_, &QPushButton::clicked, this, &InboundPage::copySelected);
     connect(table_, &QTableWidget::itemSelectionChanged, this, [this] {
         updateActions();
         const EntityId id = selectedId();
@@ -78,13 +72,13 @@ Result<bool> InboundPage::refresh()
     table_->setRowCount(static_cast<int>(result.value().size()));
     for (int row = 0; row < result.value().size(); ++row) {
         const auto &batch = result.value().at(row);
-        const QStringList cells{QString::number(row + 1), batch.batchNo,
+        const QStringList cells{QString::number(row + 1), batch.batchNo, batch.typeCodeSnapshot,
             batch.businessAt.toString(QStringLiteral("yyyy-MM-dd HH:mm")), StatusPresentation::documentText(batch.status),
             QString::number(batch.quantity),
             batch.materialModel.isEmpty() ? QStringLiteral("未填写") : batch.materialModel,
             batch.receivedByName.isEmpty() ? QStringLiteral("未填写") : batch.receivedByName};
         for (int column = 0; column < cells.size(); ++column) table_->setItem(row, column, new QTableWidgetItem(cells.at(column)));
-        StatusPresentation::apply(table_->item(row, 3), StatusPresentation::tone(batch.status));
+        StatusPresentation::apply(table_->item(row, 4), StatusPresentation::tone(batch.status));
         table_->item(row, 0)->setData(Qt::UserRole, QVariant::fromValue(batch.status));
         table_->item(row, 0)->setData(Qt::UserRole + 1, batch.id);
     }
@@ -141,11 +135,10 @@ EntityId InboundPage::selectedId() const
 void InboundPage::updateActions()
 {
     const int row = table_->currentRow(); const bool selected = row >= 0;
-    const auto status = selected ? table_->item(row, 0)->data(Qt::UserRole).value<DocumentStatus>() : DocumentStatus::Draft;
-    edit_->setEnabled(selected && status == DocumentStatus::Draft); remove_->setEnabled(selected && status == DocumentStatus::Draft);
-    confirm_->setEnabled(selected && status == DocumentStatus::Draft);
-    view_->setEnabled(selected && status != DocumentStatus::Draft); cancel_->setEnabled(selected && status == DocumentStatus::Confirmed);
-    copy_->setEnabled(selected && status == DocumentStatus::Cancelled);
+    edit_->setEnabled(selected);
+    view_->setEnabled(selected);
+    cancel_->setEnabled(selected && table_->item(row, 0)->data(Qt::UserRole).value<DocumentStatus>()
+                                       == DocumentStatus::Confirmed);
 }
 void InboundPage::setConfirmationCallback(std::function<bool(const QString &)> callback) { confirmation_ = std::move(callback); }
 bool InboundPage::confirmAction(const QString &text) const { return confirmation_ ? confirmation_(text) : QMessageBox::question(const_cast<InboundPage *>(this), QStringLiteral("确认"), text) == QMessageBox::Yes; }
@@ -186,7 +179,15 @@ void InboundPage::viewSelected()
     emit viewRequested(selectedId());
     openViewDialog(selectedId());
 }
-void InboundPage::deleteSelected() { if (selectedId() && confirmAction(QStringLiteral("确定删除草稿？"))) { const auto value = service_.deleteDraft(selectedId()); if (!value.ok()) setError(value.error()); else { setError(); emit dataChanged(); } } }
-void InboundPage::confirmSelected() { if (selectedId() && confirmAction(QStringLiteral("确定确认单据？"))) { const auto value = service_.confirm(selectedId()); if (!value.ok()) setError(value.error()); else { setError(); emit dataChanged(); } } }
-void InboundPage::cancelSelected() { if (selectedId() && confirmAction(QStringLiteral("确定取消已确认单据？"))) { const auto value = service_.cancel(selectedId()); if (!value.ok()) setError(value.error()); else { setError(); emit dataChanged(); } } }
-void InboundPage::copySelected() { if (selectedId()) { const auto value = service_.copyToDraft(selectedId()); if (!value.ok()) setError(value.error()); else { setError(); emit dataChanged(); } } }
+void InboundPage::cancelSelected()
+{
+    if (!selectedId() || !confirmAction(QStringLiteral("确定作废此记录并撤销其库存影响？之后仍可编辑恢复。")))
+        return;
+    const auto value = service_.cancel(selectedId());
+    if (!value.ok())
+        setError(value.error());
+    else {
+        setError();
+        emit dataChanged();
+    }
+}

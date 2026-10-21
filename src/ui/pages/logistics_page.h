@@ -8,6 +8,7 @@
 #include <QWidget>
 
 class InventoryQueryService;
+class QComboBox;
 class QLabel;
 class LogisticsService;
 class MasterDataService;
@@ -42,12 +43,10 @@ private slots:
     void updateActions();
     void editSelected();
     void viewSelected();
-    void deleteSelected();
-    void confirmSelected();
     void cancelSelected();
-    void copySelected();
 
 private:
+    void applySourceFilter();
     EntityId selectedId() const;
     WorkflowAction actionForType() const;
     bool confirmAction(const QString &text) const;
@@ -57,16 +56,16 @@ private:
     LogisticsService &service_;
     DocumentType type_;
     QTableWidget *table_ = nullptr;
+    QComboBox *sourceFilter_ = nullptr;
+    int sortColumn_ = -1;
+    Qt::SortOrder sortOrder_ = Qt::AscendingOrder;
     QLabel *error_ = nullptr;
     QLabel *workflowContext_ = nullptr;
     BatchWorkflowService *workflow_ = nullptr;
     EntityId currentBatchId_ = 0;
     QPushButton *edit_ = nullptr;
     QPushButton *view_ = nullptr;
-    QPushButton *remove_ = nullptr;
-    QPushButton *confirm_ = nullptr;
     QPushButton *cancel_ = nullptr;
-    QPushButton *copy_ = nullptr;
     std::function<bool(const QString &)> confirmation_;
     ServiceError lastError_;
 };

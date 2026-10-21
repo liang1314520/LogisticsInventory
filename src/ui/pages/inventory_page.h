@@ -21,6 +21,8 @@ private:
     QTableWidget *batches_=nullptr;
     QTableWidget *locations_=nullptr;
     QTableWidget *shipments_=nullptr;
+    QTableWidget *negativeBalances_=nullptr;
+    QLabel *negativeWarning_=nullptr;
     DateTimeInput *from_=nullptr;
     DateTimeInput *to_=nullptr;
     QLabel *error_=nullptr;

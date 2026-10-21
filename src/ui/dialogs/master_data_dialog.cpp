@@ -68,7 +68,8 @@ MasterDataDialog::MasterDataDialog(MasterDataService &service, Entity entity, QW
         form->addRow(QStringLiteral("计入库存"), inventory_);
         auto *hint = new QLabel(QStringLiteral(
             "公司和工厂都计库存：公司发工厂用调拨单，工厂发海外 Amazon 仓用出库单，"
-            "工厂退公司用退回单（总库存不变）。Amazon 仓可选“其他”类型且不勾选计入库存。"), this);
+            "工厂退公司用退回单（总库存不变）。Amazon 仓可选“其他”类型且不勾选计入库存。\n"
+            "修改库位类型或计库存属性会影响关联库存归属及汇总，不会删除或转换已有记录。"), this);
         hint->setWordWrap(true);
         form->addRow(hint);
     }

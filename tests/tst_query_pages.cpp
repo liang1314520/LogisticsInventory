@@ -31,7 +31,7 @@ class QueryPagesTest : public QObject {
     Q_OBJECT
 private slots:
     void init();
-    void inventoryShowsThreeDeterministicViews();
+    void inventoryShowsBalancesAndNegativeInventory();
     void batchTrackingShowsDistributionTimelineAndSnapshots();
     void batchTrackingKeepsZeroBalanceHistory();
     void reportsExportAtomicallyWithBomAndSuffix();
@@ -64,13 +64,18 @@ void QueryPagesTest::init()
     const auto category=master->createCategory(QStringLiteral("旧分类")); QVERIFY(category.ok()); categoryId=category.value().id;
     const auto productType=master->createProductType(categoryId,QStringLiteral("M-1"),{}); QVERIFY(productType.ok()); productTypeId=productType.value().id;
     const auto location=master->createLocation(QStringLiteral("旧仓"),LocationType::Company,true); QVERIFY(location.ok()); locationId=location.value().id;
-    const auto batch=inbound->createDraft({QStringLiteral("B-1"),productTypeId,25,locationId,QDateTime(QDate(2026,9,1),QTime(8,0)),{}}); QVERIFY(batch.ok()); batchId=batch.value(); QVERIFY(inbound->confirm(batchId).ok());
+    const auto person = master->createPersonnel(QStringLiteral("经办人"));
+    QVERIFY(person.ok());
+    const auto batch = inbound->create({QStringLiteral("B-1"), productTypeId, 25, locationId,
+        QDateTime(QDate(2026,9,1),QTime(8,0)), {}, QStringLiteral("V40"), person.value().id});
+    QVERIFY(batch.ok());
+    batchId = batch.value();
 }
 
-void QueryPagesTest::inventoryShowsThreeDeterministicViews()
+void QueryPagesTest::inventoryShowsBalancesAndNegativeInventory()
 {
     InventoryPage page(*queries); QVERIFY(page.refresh().ok());
-    auto *tabs=page.findChild<QTabWidget *>(QStringLiteral("inventoryTabs")); QVERIFY(tabs); QCOMPARE(tabs->count(),3);
+    auto *tabs=page.findChild<QTabWidget *>(QStringLiteral("inventoryTabs")); QVERIFY(tabs); QCOMPARE(tabs->count(),4);
     QCOMPARE(page.findChild<QTableWidget *>(QStringLiteral("batchBalances"))->item(0,0)->text(),QStringLiteral("B-1"));
     QCOMPARE(page.findChild<QTableWidget *>(QStringLiteral("locationBalances"))->item(0,0)->text(),QStringLiteral("旧仓"));
     QVERIFY(page.findChild<QTableWidget *>(QStringLiteral("productTypeShipmentSummary")));
@@ -84,7 +89,7 @@ void QueryPagesTest::batchTrackingShowsDistributionTimelineAndSnapshots()
     auto *timeline=page.findChild<QTableWidget *>(QStringLiteral("timeline"));
     QCOMPARE(distribution->rowCount(),1); QCOMPARE(distribution->item(0,0)->text(),QStringLiteral("旧仓"));
     QCOMPARE(timeline->rowCount(),1); QCOMPARE(timeline->item(0,4)->text(),QStringLiteral("旧仓"));
-    QCOMPARE(page.findChild<QLabel *>(QStringLiteral("batchSummary"))->text(),QStringLiteral("B-1 / 旧分类 / M-1 / 25"));
+    QCOMPARE(page.findChild<QLabel *>(QStringLiteral("batchSummary"))->text(),QStringLiteral("B-1 / 旧分类 / M-1 / 物料型号：V40 / 25"));
 }
 
 void QueryPagesTest::batchTrackingKeepsZeroBalanceHistory()
@@ -100,7 +105,7 @@ void QueryPagesTest::batchTrackingKeepsZeroBalanceHistory()
     QCOMPARE(page.findChild<QTableWidget *>(QStringLiteral("distribution"))->rowCount(), 0);
     QCOMPARE(page.findChild<QTableWidget *>(QStringLiteral("timeline"))->rowCount(), 2);
     QCOMPARE(page.findChild<QLabel *>(QStringLiteral("batchSummary"))->text(),
-             QStringLiteral("B-1 / 旧分类 / M-1 / 0"));
+             QStringLiteral("B-1 / 旧分类 / M-1 / 物料型号：V40 / 0"));
 }
 
 void QueryPagesTest::reportsExportAtomicallyWithBomAndSuffix()
@@ -215,7 +220,7 @@ void QueryPagesTest::modelDialogAndPageSupportCrud()
     QVERIFY(edit.save());
     MasterDataPage page(*master);
     auto *tabs = page.findChild<QTabWidget *>(QStringLiteral("masterDataTabs"));
-    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(tabs->count(), 5);
     tabs->setCurrentIndex(3);
     auto *models = page.findChild<QTableWidget *>(QStringLiteral("productModelsTable"));
     QVERIFY(models);

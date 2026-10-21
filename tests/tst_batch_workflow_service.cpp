@@ -8,37 +8,30 @@
 #include "services/master_data_service.h"
 #include "test_support.h"
 
-#include <algorithm>
 #include <memory>
 #include <QtTest>
 
 class BatchWorkflowServiceTest : public QObject {
     Q_OBJECT
-
 private slots:
     void init();
-    void draftInboundIsInProgressAndBlocksOutbound();
-    void confirmedInboundOffersDirectOutboundOrTransfer();
+    void savedInboundAllowsOutboundSupplement();
+    void confirmedInboundOffersOutboundOrTransfer();
     void confirmedTransferShowsDistributedStockAndOutboundNext();
     void outboundThenReturnOffersReprocess();
     void zeroBalanceHistoryRemainsTrackableAndCompleted();
     void multipleBatchesHaveIndependentStates();
     void locationQueryFailureIsReturned();
-    void directOutboundCompletesWorkflow();
+    void negativeLocationDoesNotCompleteWorkflow();
     void cancelledOutboundReopensAvailableStock();
     void partialOutboundStillAllowsReturn();
-    void pendingDraftBlocksNewActions_data();
-    void pendingDraftBlocksNewActions();
-
+    void savedRecordsAllowNewActions_data();
+    void savedRecordsAllowNewActions();
 private:
-    EntityId addLocation(const QString &name, LocationType type, bool countsAsInventory);
     EntityId createConfirmedBatch(const QString &batchNo, qint64 quantity);
     Result<EntityId> createLogistics(const QString &number, DocumentType type,
                                      EntityId source, EntityId destination,
-                                     EntityId batch, qint64 quantity,
-                                     EntityId model = 0);
-    bool containsAction(const QVector<WorkflowAction> &actions, WorkflowAction action) const;
-
+                                     EntityId batch, qint64 quantity, EntityId model = 0);
     std::unique_ptr<TestDatabase> db;
     std::unique_ptr<MasterDataRepository> masterRepository;
     std::unique_ptr<MasterDataService> master;
@@ -48,11 +41,7 @@ private:
     std::unique_ptr<LogisticsService> logistics;
     std::unique_ptr<InventoryQueryService> queries;
     std::unique_ptr<BatchWorkflowService> workflow;
-    EntityId productTypeId = 0;
-    EntityId companyId = 0;
-    EntityId factoryId = 0;
-    EntityId externalId = 0;
-    EntityId modelId = 0;
+    EntityId productTypeId = 0, companyId = 0, factoryId = 0, externalId = 0, modelId = 0, personId = 0;
 };
 
 void BatchWorkflowServiceTest::init()
@@ -63,103 +52,77 @@ void BatchWorkflowServiceTest::init()
     master = std::make_unique<MasterDataService>(*masterRepository);
     documents = std::make_unique<DocumentRepository>(db->database());
     inventory = std::make_unique<InventoryRepository>(db->database());
-    inbound = std::make_unique<InboundService>(db->database(), *masterRepository,
-                                               *documents, *inventory);
-    logistics = std::make_unique<LogisticsService>(db->database(), *masterRepository,
-                                                    *documents, *inventory);
+    inbound = std::make_unique<InboundService>(db->database(), *masterRepository, *documents, *inventory);
+    logistics = std::make_unique<LogisticsService>(db->database(), *masterRepository, *documents, *inventory);
     queries = std::make_unique<InventoryQueryService>(db->database());
-
     const auto category = master->createCategory(QStringLiteral("设备"));
     QVERIFY(category.ok());
-    const auto type = master->createProductType(category.value().id,
-                                                 QStringLiteral("保险箱"), {});
+    const auto type = master->createProductType(category.value().id, QStringLiteral("保险箱"), {});
     QVERIFY(type.ok());
     productTypeId = type.value().id;
     const auto model = master->createProductModel(productTypeId, QStringLiteral("F25"), {});
-    QVERIFY(model.ok());
+    const auto company = master->createLocation(QStringLiteral("公司仓"), LocationType::Company, true);
+    const auto factory = master->createLocation(QStringLiteral("工厂A"), LocationType::Factory, true);
+    const auto external = master->createLocation(QStringLiteral("Amazon"), LocationType::Other, false);
+    const auto person = master->createPersonnel(QStringLiteral("经办人"));
+    QVERIFY(model.ok() && company.ok() && factory.ok() && external.ok() && person.ok());
     modelId = model.value().id;
-    companyId = addLocation(QStringLiteral("公司仓"), LocationType::Company, true);
-    factoryId = addLocation(QStringLiteral("工厂A"), LocationType::Factory, true);
-    externalId = addLocation(QStringLiteral("客户现场"), LocationType::Customer, false);
-    workflow = std::make_unique<BatchWorkflowService>(*master, *documents, *inventory,
-                                                       *queries);
-}
-
-EntityId BatchWorkflowServiceTest::addLocation(const QString &name, LocationType type,
-                                               bool countsAsInventory)
-{
-    const auto result = master->createLocation(name, type, countsAsInventory);
-    return result.ok() ? result.value().id : 0;
+    companyId = company.value().id;
+    factoryId = factory.value().id;
+    externalId = external.value().id;
+    personId = person.value().id;
+    workflow = std::make_unique<BatchWorkflowService>(*master, *documents, *inventory, *queries);
 }
 
 EntityId BatchWorkflowServiceTest::createConfirmedBatch(const QString &batchNo, qint64 quantity)
 {
-    const auto created = inbound->createDraft({batchNo, productTypeId, quantity, companyId,
-                                                QDateTime::currentDateTime(), {}});
-    if (!created.ok() || !inbound->confirm(created.value()).ok())
-        return 0;
-    return created.value();
+    const auto created = inbound->create({batchNo, productTypeId, quantity, companyId,
+        QDateTime::currentDateTime(), {}, QStringLiteral("V40"), personId});
+    return created.ok() ? created.value() : 0;
 }
 
 Result<EntityId> BatchWorkflowServiceTest::createLogistics(
     const QString &number, DocumentType type, EntityId source, EntityId destination,
     EntityId batch, qint64 quantity, EntityId model)
 {
-    const auto created = logistics->createDraft({number, type, source, destination,
-        QDateTime::currentDateTime(), {}, {{batch, quantity, model}}});
-    if (!created.ok())
-        return created;
-    const auto confirmed = logistics->confirm(created.value());
-    if (!confirmed.ok())
-        return Result<EntityId>::failure(confirmed.error());
-    return created;
+    return logistics->create({number, type, source, destination, QDateTime::currentDateTime(), {},
+        {{batch, quantity, model}}, type == DocumentType::Outbound ? personId : 0});
 }
 
-bool BatchWorkflowServiceTest::containsAction(const QVector<WorkflowAction> &actions,
-                                               WorkflowAction action) const
+void BatchWorkflowServiceTest::savedInboundAllowsOutboundSupplement()
 {
-    return std::find(actions.cbegin(), actions.cend(), action) != actions.cend();
-}
-
-void BatchWorkflowServiceTest::draftInboundIsInProgressAndBlocksOutbound()
-{
-    const auto created = inbound->createDraft({QStringLiteral("B-DRAFT"), productTypeId, 10,
-        companyId, QDateTime::currentDateTime(), {}});
-    QVERIFY(created.ok());
-
-    const auto state = workflow->state(created.value());
-    QVERIFY(state.ok());
-    QCOMPARE(state.value().steps.at(1).status, WorkflowStepStatus::InProgress);
-    QVERIFY(!containsAction(state.value().availableActions, WorkflowAction::CreateOutbound));
-    QCOMPARE(state.value().nextPage, 1);
-}
-
-void BatchWorkflowServiceTest::confirmedInboundOffersDirectOutboundOrTransfer()
-{
-    const EntityId batch = createConfirmedBatch(QStringLiteral("B-CONFIRMED"), 10);
+    const EntityId batch = createConfirmedBatch(QStringLiteral("B-SAVED"), 10);
     QVERIFY(batch > 0);
-
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().steps.at(1).status, WorkflowStepStatus::Completed);
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::CreateOutbound));
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::CreateTransfer));
-    QCOMPARE(state.value().nextPage, 3);
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateOutbound));
+    QVERIFY(workflow->canStartAction(batch, WorkflowAction::CreateOutbound).ok());
+    QCOMPARE(state.value().nextPage, 2);
+}
+
+void BatchWorkflowServiceTest::confirmedInboundOffersOutboundOrTransfer()
+{
+    const EntityId batch = createConfirmedBatch(QStringLiteral("B-CONFIRMED"), 10);
+    QVERIFY(batch > 0);
+    const auto state = workflow->state(batch);
+    QVERIFY(state.ok());
+    QCOMPARE(state.value().steps.at(1).status, WorkflowStepStatus::Completed);
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateOutbound));
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateTransfer));
+    QCOMPARE(state.value().nextPage, 2);
 }
 
 void BatchWorkflowServiceTest::confirmedTransferShowsDistributedStockAndOutboundNext()
 {
     const EntityId batch = createConfirmedBatch(QStringLiteral("B-TRANSFER"), 10);
     QVERIFY(batch > 0);
-    const auto transfer = createLogistics(QStringLiteral("T-1"), DocumentType::Transfer,
-                                          companyId, factoryId, batch, 5);
-    QVERIFY(transfer.ok());
-
+    QVERIFY(createLogistics(QStringLiteral("T-1"), DocumentType::Transfer, companyId, factoryId, batch, 5).ok());
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().currentLocations.size(), 2);
     QCOMPARE(state.value().steps.at(2).status, WorkflowStepStatus::Completed);
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::CreateOutbound));
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateOutbound));
     QCOMPARE(state.value().nextPage, 3);
 }
 
@@ -167,64 +130,56 @@ void BatchWorkflowServiceTest::outboundThenReturnOffersReprocess()
 {
     const EntityId batch = createConfirmedBatch(QStringLiteral("B-RETURN"), 10);
     QVERIFY(batch > 0);
-    const auto outbound = createLogistics(QStringLiteral("O-1"), DocumentType::Outbound,
-                                          companyId, externalId, batch, 10, modelId);
-    QVERIFY(outbound.ok());
-    const auto returned = createLogistics(QStringLiteral("R-1"), DocumentType::Return,
-                                          externalId, companyId, batch, 3, modelId);
-    QVERIFY(returned.ok());
-
+    QVERIFY(createLogistics(QStringLiteral("T-1"), DocumentType::Transfer, companyId, factoryId, batch, 10).ok());
+    QVERIFY(createLogistics(QStringLiteral("O-1"), DocumentType::Outbound, factoryId, externalId, batch, 7, modelId).ok());
+    QVERIFY(createLogistics(QStringLiteral("R-1"), DocumentType::Return, factoryId, companyId, batch, 3, modelId).ok());
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().currentQuantity, qint64(3));
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::CreateOutbound));
-    QCOMPARE(state.value().nextPage, 3);
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateOutbound));
+    QCOMPARE(state.value().nextPage, 2);
 }
 
 void BatchWorkflowServiceTest::zeroBalanceHistoryRemainsTrackableAndCompleted()
 {
     const EntityId batch = createConfirmedBatch(QStringLiteral("B-ZERO"), 10);
     QVERIFY(batch > 0);
-    const auto outbound = createLogistics(QStringLiteral("O-ZERO"), DocumentType::Outbound,
-                                          companyId, externalId, batch, 10, modelId);
-    QVERIFY(outbound.ok());
-
+    QVERIFY(createLogistics(QStringLiteral("T-ZERO"), DocumentType::Transfer, companyId, factoryId, batch, 10).ok());
+    QVERIFY(createLogistics(QStringLiteral("O-ZERO"), DocumentType::Outbound, factoryId, externalId, batch, 10, modelId).ok());
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().currentQuantity, qint64(0));
     QCOMPARE(state.value().steps.at(5).status, WorkflowStepStatus::Completed);
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::ViewTracking));
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::ViewTracking));
 }
 
-void BatchWorkflowServiceTest::directOutboundCompletesWorkflow()
+void BatchWorkflowServiceTest::negativeLocationDoesNotCompleteWorkflow()
 {
-    const EntityId batch = createConfirmedBatch(QStringLiteral("B-DIRECT"), 10);
+    const EntityId batch = createConfirmedBatch(QStringLiteral("B-SUPPLEMENT"), 10);
     QVERIFY(batch > 0);
-    const auto outbound = createLogistics(QStringLiteral("O-DIRECT"), DocumentType::Outbound,
-                                          companyId, externalId, batch, 10, modelId);
-    QVERIFY(outbound.ok());
+    QVERIFY(createLogistics(QStringLiteral("O-SUPPLEMENT"), DocumentType::Outbound,
+        factoryId, externalId, batch, 10, modelId).ok());
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().currentQuantity, qint64(0));
-    QCOMPARE(state.value().steps.at(3).status, WorkflowStepStatus::Completed);
-    QCOMPARE(state.value().steps.at(5).status, WorkflowStepStatus::Completed);
-    QCOMPARE(state.value().nextPage, 5);
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::ViewTracking));
+    QCOMPARE(state.value().steps.at(5).status, WorkflowStepStatus::NeedsAction);
+    QCOMPARE(state.value().overallStatus, QStringLiteral("需核对"));
+    QVERIFY(workflow->canStartAction(batch, WorkflowAction::CreateTransfer).ok());
 }
 
 void BatchWorkflowServiceTest::cancelledOutboundReopensAvailableStock()
 {
     const EntityId batch = createConfirmedBatch(QStringLiteral("B-CANCEL-OUT"), 10);
     QVERIFY(batch > 0);
-    const auto outbound = logistics->createDraft({QStringLiteral("O-CANCEL-OUT"), DocumentType::Outbound,
-        companyId, externalId, QDateTime::currentDateTime(), {}, {{batch, 10, modelId}}});
+    QVERIFY(createLogistics(QStringLiteral("T-CANCEL-OUT"), DocumentType::Transfer, companyId, factoryId, batch, 10).ok());
+    const auto outbound = createLogistics(QStringLiteral("O-CANCEL-OUT"), DocumentType::Outbound,
+        factoryId, externalId, batch, 10, modelId);
     QVERIFY(outbound.ok());
-    QVERIFY(logistics->confirm(outbound.value()).ok());
     QVERIFY(logistics->cancel(outbound.value()).ok());
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().currentQuantity, qint64(10));
-    QVERIFY(containsAction(state.value().availableActions, WorkflowAction::CreateOutbound));
+    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateOutbound));
     QCOMPARE(state.value().nextPage, 3);
 }
 
@@ -243,10 +198,7 @@ void BatchWorkflowServiceTest::multipleBatchesHaveIndependentStates()
     const EntityId first = createConfirmedBatch(QStringLiteral("B-FIRST"), 10);
     const EntityId second = createConfirmedBatch(QStringLiteral("B-SECOND"), 20);
     QVERIFY(first > 0 && second > 0);
-    const auto transfer = createLogistics(QStringLiteral("T-FIRST"), DocumentType::Transfer,
-                                          companyId, factoryId, first, 4);
-    QVERIFY(transfer.ok());
-
+    QVERIFY(createLogistics(QStringLiteral("T-FIRST"), DocumentType::Transfer, companyId, factoryId, first, 4).ok());
     const auto firstState = workflow->state(first);
     const auto secondState = workflow->state(second);
     QVERIFY(firstState.ok() && secondState.ok());
@@ -262,17 +214,15 @@ void BatchWorkflowServiceTest::partialOutboundStillAllowsReturn()
 {
     const EntityId batch = createConfirmedBatch(QStringLiteral("B-PARTIAL"), 10);
     QVERIFY(batch > 0);
-    QVERIFY(createLogistics(QStringLiteral("O-PARTIAL"), DocumentType::Outbound,
-                             companyId, externalId, batch, 6, modelId).ok());
+    QVERIFY(createLogistics(QStringLiteral("O-PARTIAL"), DocumentType::Outbound, factoryId, externalId, batch, 6, modelId).ok());
     const auto state = workflow->state(batch);
     QVERIFY(state.ok());
     QCOMPARE(state.value().currentQuantity, qint64(4));
-    QVERIFY(state.value().availableActions.contains(WorkflowAction::CreateReturn));
     QVERIFY(workflow->canStartAction(batch, WorkflowAction::CreateReturn).ok());
     QVERIFY(workflow->canStartAction(batch, WorkflowAction::CreateOutbound).ok());
 }
 
-void BatchWorkflowServiceTest::pendingDraftBlocksNewActions_data()
+void BatchWorkflowServiceTest::savedRecordsAllowNewActions_data()
 {
     QTest::addColumn<DocumentType>("type");
     QTest::newRow("transfer") << DocumentType::Transfer;
@@ -280,28 +230,18 @@ void BatchWorkflowServiceTest::pendingDraftBlocksNewActions_data()
     QTest::newRow("return") << DocumentType::Return;
 }
 
-void BatchWorkflowServiceTest::pendingDraftBlocksNewActions()
+void BatchWorkflowServiceTest::savedRecordsAllowNewActions()
 {
     QFETCH(DocumentType, type);
-    const EntityId batch = createConfirmedBatch(QStringLiteral("B-PENDING"), 10);
+    const EntityId batch = createConfirmedBatch(QStringLiteral("B-RECORD"), 10);
     QVERIFY(batch > 0);
-    if (type == DocumentType::Return)
-        QVERIFY(createLogistics(QStringLiteral("O-PENDING"), DocumentType::Outbound,
-                                 companyId, externalId, batch, 10).ok());
-    const auto draft = logistics->createDraft({QStringLiteral("L-PENDING"), type,
-        type == DocumentType::Return ? externalId : companyId,
+    const auto saved = createLogistics(QStringLiteral("L-RECORD"), type,
+        type == DocumentType::Transfer ? companyId : factoryId,
         type == DocumentType::Transfer ? factoryId : type == DocumentType::Return ? companyId : externalId,
-        QDateTime::currentDateTime(), {}, {{batch, 1}}});
-    QVERIFY(draft.ok());
-    const auto state = workflow->state(batch);
-    QVERIFY(state.ok());
-    QCOMPARE(state.value().nextPage, type == DocumentType::Transfer ? 2 : type == DocumentType::Return ? 8 : 3);
-    for (const auto action : {WorkflowAction::CreateTransfer, WorkflowAction::CreateOutbound,
-                              WorkflowAction::CreateReturn}) {
-        const auto allowed = workflow->canStartAction(batch, action);
-        QVERIFY(!allowed.ok());
-        QVERIFY(allowed.error().message.contains(QStringLiteral("草稿")));
-    }
+        batch, 1);
+    QVERIFY(saved.ok());
+    for (const auto action : {WorkflowAction::CreateTransfer, WorkflowAction::CreateOutbound, WorkflowAction::CreateReturn})
+        QVERIFY(workflow->canStartAction(batch, action).ok());
 }
 
 QTEST_MAIN(BatchWorkflowServiceTest)

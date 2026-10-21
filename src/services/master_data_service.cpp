@@ -139,15 +139,6 @@ Result<Location> MasterDataService::updateLocation(
                 ? QStringLiteral("工厂必须计入库存，公司发往工厂请使用调拨单")
                 : QStringLiteral("公司库位必须计入库存"),
             QStringLiteral("countsAsInventory")});
-    if (current.value().type != type || current.value().countsAsInventory != countsAsInventory) {
-        const auto references = repository_.countLocationReferences(id);
-        if (!references.ok()) return forwardError<Location>(references.error());
-        if (references.value() > 0)
-            return Result<Location>::failure({QStringLiteral("in_use"),
-                QStringLiteral("库位已有业务记录，不能修改类型或计库存属性"),
-                current.value().type != type ? QStringLiteral("locationType")
-                                             : QStringLiteral("countsAsInventory")});
-    }
     const auto exists = repository_.locationNameExists(value, id);
     if (!exists.ok()) return forwardError<Location>(exists.error());
     if (exists.value()) return Result<Location>::failure(duplicate(QStringLiteral("name")));

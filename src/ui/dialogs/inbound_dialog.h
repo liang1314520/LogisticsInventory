@@ -21,8 +21,8 @@ public:
     InboundDialog(MasterDataService &masterData, InboundService &service,
                   QWidget *parent = nullptr);
     Result<bool> initialize(EntityId id = 0, bool readOnly = false);
-    void setDraft(const InboundDraft &draft);
-    InboundDraft draft() const;
+    void setInput(const InboundInput &input);
+    InboundInput input() const;
     bool save();
     bool isReadOnly() const;
 
@@ -50,6 +50,7 @@ private:
     DateTimeInput *businessAt_ = nullptr;
     QComboBox *receivedBy_ = nullptr;
     QTextEdit *note_ = nullptr;
+    QLabel *saveHint_ = nullptr;
     QLabel *error_ = nullptr;
     QPushButton *save_ = nullptr;
 };

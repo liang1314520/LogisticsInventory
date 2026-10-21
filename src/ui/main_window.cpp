@@ -1,5 +1,7 @@
 #include "main_window.h"
 
+#include "services/inventory_query_service.h"
+
 #include "ui/pages/dashboard_page.h"
 #include "ui/pages/inbound_page.h"
 #include "ui/pages/logistics_page.h"
@@ -25,6 +27,7 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStatusBar>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QTableWidget>
@@ -51,7 +54,8 @@ void resizeTableRows(QTableWidget *table)
 MainWindow::MainWindow(MasterDataService &masterData, InventoryQueryService &queries,
                        InboundService &inbound, LogisticsService &logistics,
                        BatchWorkflowService &workflow, QWidget *parent)
-    : QMainWindow(parent), defaultFont_(QApplication::font()), workflowService_(workflow)
+    : QMainWindow(parent), defaultFont_(QApplication::font()), workflowService_(workflow),
+      queries_(queries)
 {
     setObjectName(QStringLiteral("mainWindow"));
     QSettings settings;
@@ -313,21 +317,21 @@ void MainWindow::refreshWorkflowContext()
                                        state.value().nextActionText));
     transfer_->setWorkflowMessage(QStringLiteral("前置：%1\n当前操作：%2")
                                   .arg(state.value().steps.at(2).prerequisiteMessage.isEmpty()
-                                           ? QStringLiteral("公司入库已确认，公司有库存且工厂计库存")
+                                           ? QStringLiteral("公司与工厂均计库存，账面余额不足也可补录")
                                            : state.value().steps.at(2).prerequisiteMessage,
                                        state.value().steps.at(2).actionText.isEmpty()
                                            ? state.value().nextActionText
                                            : state.value().steps.at(2).actionText));
     outbound_->setWorkflowMessage(QStringLiteral("前置：%1\n当前操作：%2")
                                   .arg(state.value().steps.at(3).prerequisiteMessage.isEmpty()
-                                           ? QStringLiteral("工厂已有该批次可用库存，目的地为不计库存的 Amazon 仓")
+                                           ? QStringLiteral("工厂发往不计库存的 Amazon 仓，允许先补录出库")
                                            : state.value().steps.at(3).prerequisiteMessage,
                                        state.value().steps.at(3).actionText.isEmpty()
                                            ? state.value().nextActionText
                                            : state.value().steps.at(3).actionText));
     returns_->setWorkflowMessage(QStringLiteral("前置：%1\n当前操作：%2")
                                  .arg(state.value().steps.at(4).prerequisiteMessage.isEmpty()
-                                          ? QStringLiteral("工厂有实际库存，仅实际退回公司时登记，总库存不变")
+                                          ? QStringLiteral("仅实际退回公司时登记，总库存不变，账面余额不足也可补录")
                                           : state.value().steps.at(4).prerequisiteMessage,
                                       state.value().steps.at(4).actionText.isEmpty()
                                           ? state.value().nextActionText
@@ -357,6 +361,14 @@ void MainWindow::refreshAfterMutation()
         refreshWorkflowContext();
     dashboard_->refresh();
     refreshCurrentPage();
+    const auto negatives = queries_.negativeBalanceCount();
+    if (!negatives.ok())
+        statusBar()->showMessage(QStringLiteral("记录变更已保存；负库存提示暂不可用：%1")
+                                     .arg(negatives.error().message));
+    else
+        statusBar()->showMessage(negatives.value() > 0
+            ? QStringLiteral("记录变更已保存；存在 %1 处负库存，请核对或补录相关记录").arg(negatives.value())
+            : QStringLiteral("记录变更已保存"));
 }
 
 void MainWindow::refreshCurrentPage()

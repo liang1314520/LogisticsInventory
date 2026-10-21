@@ -1,9 +1,12 @@
 #include "inventory_repository.h"
 
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
 #include <QVariant>
+
+#include <limits>
 
 namespace {
 InventoryEntry readEntry(const QSqlQuery &query)
@@ -104,6 +107,14 @@ Result<InventoryEntry> InventoryRepository::insertEntry(
     EntityId sourceId, EntityId sourceLineId, qint64 quantityDelta,
     const QDateTime &businessAt, EntityId reversalOfEntryId)
 {
+    const auto current = quantityResult(batchId, locationId);
+    if (!current.ok())
+        return Result<InventoryEntry>::failure(current.error());
+    if ((quantityDelta > 0 && current.value() > std::numeric_limits<qint64>::max() - quantityDelta) ||
+        (quantityDelta < 0 && current.value() < std::numeric_limits<qint64>::min() - quantityDelta)) {
+        return Result<InventoryEntry>::failure({QStringLiteral("quantity_overflow"),
+            QStringLiteral("库存数量超出范围"), QStringLiteral("quantity")});
+    }
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
         "INSERT INTO inventory_entries(batch_id,location_id,source_type,source_id,"
@@ -148,5 +159,36 @@ Result<QVector<InventoryEntry>> InventoryRepository::unreversedEntriesForSource(
     QVector<InventoryEntry> entries;
     while (query.next())
         entries.append(readEntry(query));
+    if (query.lastError().isValid())
+        return Result<QVector<InventoryEntry>>::failure(databaseError(query));
     return Result<QVector<InventoryEntry>>::success(entries);
+}
+
+Result<bool> InventoryRepository::removeEntriesForSource(const QString &sourceType, EntityId sourceId)
+{
+    const auto entries = entriesForSourceResult(sourceType, sourceId);
+    if (!entries.ok())
+        return Result<bool>::failure(entries.error());
+    // 先移除冲销行，再删除被引用的原始流水。
+    for (const bool reversals : {true, false}) {
+        QSqlQuery query(database_.connection());
+        query.prepare(QStringLiteral(
+            "DELETE FROM inventory_entries WHERE source_type=? AND source_id=? "
+            "AND reversal_of_entry_id IS %1NULL").arg(reversals ? QStringLiteral("NOT ") : QString()));
+        query.addBindValue(sourceType);
+        query.addBindValue(sourceId);
+        if (!query.exec())
+            return Result<bool>::failure(databaseError(query));
+    }
+    QSet<QPair<EntityId, EntityId>> checked;
+    for (const auto &entry : entries.value()) {
+        const auto key = qMakePair(entry.batchId, entry.locationId);
+        if (checked.contains(key))
+            continue;
+        checked.insert(key);
+        const auto balance = quantityResult(entry.batchId, entry.locationId);
+        if (!balance.ok())
+            return Result<bool>::failure(balance.error());
+    }
+    return Result<bool>::success(true);
 }

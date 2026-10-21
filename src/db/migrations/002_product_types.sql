@@ -33,7 +33,7 @@ CREATE TABLE inbound_batches_v2(
  quantity INTEGER NOT NULL CHECK(quantity > 0),
  initial_location_id INTEGER NOT NULL REFERENCES locations(id),
  business_at TEXT NOT NULL,
- status TEXT NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft','Confirmed','Cancelled')),
+ status TEXT NOT NULL DEFAULT 'Confirmed' CHECK(status IN ('Confirmed','Cancelled')),
  note TEXT NOT NULL DEFAULT '',
  category_name_snapshot TEXT,
  type_code_snapshot TEXT,
@@ -44,9 +44,9 @@ CREATE TABLE inbound_batches_v2(
 );
 INSERT INTO inbound_batches_v2
 SELECT b.id,b.batch_no,b.material_id,b.quantity,b.initial_location_id,b.business_at,b.status,b.note,
-       CASE WHEN b.status='Draft' THEN NULL ELSE c.name END,
-       CASE WHEN b.status='Draft' THEN NULL ELSE COALESCE(b.model_code_snapshot,m.model_code) END,
-       CASE WHEN b.status='Draft' THEN NULL ELSE COALESCE(b.location_name_snapshot,l.name) END,
+       c.name,
+       COALESCE(b.model_code_snapshot,m.model_code),
+       COALESCE(b.location_name_snapshot,l.name),
        b.created_at,b.confirmed_at,b.cancelled_at
 FROM inbound_batches b
 JOIN materials m ON m.id=b.material_id

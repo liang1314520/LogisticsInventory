@@ -9,19 +9,17 @@ public:
     LogisticsService(Database &database, MasterDataRepository &masterData,
                      DocumentRepository &documents, InventoryRepository &inventory);
 
-    Result<EntityId> createDraft(const LogisticsDraft &draft);
-    Result<bool> updateDraft(EntityId id, const LogisticsDraft &draft);
+    Result<EntityId> create(const LogisticsInput &input);
+    Result<bool> update(EntityId id, const LogisticsInput &input);
     Result<LogisticsDocument> byId(EntityId id) const;
-    Result<bool> confirm(EntityId id);
     Result<bool> cancel(EntityId id);
-    Result<EntityId> copyToDraft(EntityId id);
     Result<QVector<LogisticsDocument>> list(DocumentType type) const;
-    Result<QVector<ReturnableLine>> returnableLines(EntityId factoryLocationId) const;
-    Result<bool> deleteDraft(EntityId id);
 
 private:
-    ServiceError validateDraft(const LogisticsDraft &draft, bool requireNumber = true) const;
-    ServiceError validateDocument(const LogisticsDocument &document) const;
+    Result<EntityId> save(EntityId id, const LogisticsInput &input);
+    Result<LogisticsDocument> prepare(const LogisticsInput &input,
+                                      const LogisticsDocument *current) const;
+    Result<bool> writeEntries(const LogisticsDocument &document);
 
     Database &database_;
     MasterDataRepository &masterData_;

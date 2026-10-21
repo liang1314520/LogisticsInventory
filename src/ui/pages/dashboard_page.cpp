@@ -2,6 +2,7 @@
 
 #include "services/inventory_query_service.h"
 #include "ui/widgets/layout_utils.h"
+#include "ui/widgets/status_presentation.h"
 
 #include <QDate>
 #include <QFormLayout>
@@ -28,6 +29,11 @@ DashboardPage::DashboardPage(InventoryQueryService &service, QWidget *parent)
     outbound_ = addValue(QStringLiteral("本月对外出库"), QStringLiteral("monthlyOutbound"));
     returned_ = addValue(QStringLiteral("本月工厂退回（内部流转）"), QStringLiteral("monthlyReturned"));
     layout->addLayout(summary);
+    negativeWarning_ = new QLabel(this);
+    negativeWarning_->setObjectName(QStringLiteral("negativeInventoryWarning"));
+    negativeWarning_->setWordWrap(true);
+    StatusPresentation::apply(negativeWarning_, StatusPresentation::Tone::Attention);
+    layout->addWidget(negativeWarning_);
     recent_ = new QTableWidget(0, 6, this);
     recent_->setObjectName(QStringLiteral("recentRecords"));
     recent_->setHorizontalHeaderLabels({QStringLiteral("单号"), QStringLiteral("业务"),
@@ -48,6 +54,9 @@ Result<bool> DashboardPage::refresh()
     inbound_->setText(QString::number(value.monthlyInbound));
     outbound_->setText(QString::number(value.monthlyOutbound));
     returned_->setText(QString::number(value.monthlyReturned));
+    negativeWarning_->setText(QStringLiteral("存在 %1 处批次／库位负库存，请核对或补录相关记录。")
+                                  .arg(value.negativeBalanceCount));
+    negativeWarning_->setVisible(value.negativeBalanceCount > 0);
     recent_->clearContents();
     recent_->setRowCount(static_cast<int>(value.recentRecords.size()));
     for (int row = 0; row < value.recentRecords.size(); ++row) {

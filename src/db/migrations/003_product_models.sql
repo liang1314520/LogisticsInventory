@@ -24,7 +24,7 @@ CREATE TABLE logistics_documents_v3(
  source_location_id INTEGER NOT NULL REFERENCES locations(id),
  destination_location_id INTEGER NOT NULL REFERENCES locations(id),
  business_at TEXT NOT NULL,
- status TEXT NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft','Confirmed','Cancelled')),
+ status TEXT NOT NULL DEFAULT 'Confirmed' CHECK(status IN ('Confirmed','Cancelled')),
  note TEXT NOT NULL DEFAULT '',
  source_name_snapshot TEXT,
  destination_name_snapshot TEXT,

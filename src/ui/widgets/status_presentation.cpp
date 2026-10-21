@@ -31,7 +31,6 @@ Tone tone(DocumentStatus status)
 {
     switch (status) {
     case DocumentStatus::Confirmed: return Tone::Success;
-    case DocumentStatus::Draft: return Tone::Active;
     case DocumentStatus::Cancelled: return Tone::Neutral;
     }
     return Tone::Neutral;
@@ -53,8 +52,7 @@ QString documentText(DocumentStatus status)
 {
     switch (status) {
     case DocumentStatus::Confirmed: return QStringLiteral("已确认");
-    case DocumentStatus::Cancelled: return QStringLiteral("已取消");
-    case DocumentStatus::Draft: return QStringLiteral("草稿");
+    case DocumentStatus::Cancelled: return QStringLiteral("已作废");
     }
     return {};
 }

@@ -69,15 +69,20 @@ LogisticsDialog::LogisticsDialog(MasterDataService &masterData, InventoryQuerySe
     if (type_ == DocumentType::Outbound) {
         outboundConfirmedBy_ = new QComboBox(this);
         outboundConfirmedBy_->setObjectName(QStringLiteral("outboundConfirmedById"));
-        outboundConfirmedBy_->setToolTip(QStringLiteral("确认出库前必选；请先在基础资料的人员名单中录入姓名"));
+        outboundConfirmedBy_->setToolTip(QStringLiteral("保存前必选；请先在基础资料的人员名单中录入姓名"));
         form->addRow(QStringLiteral("出库确认人"), outboundConfirmedBy_);
         connect(outboundConfirmedBy_, &QComboBox::activated, this, &LogisticsDialog::updateContentSize);
     }
     form->addRow(QStringLiteral("备注"), note_);
     layout->addLayout(form);
+    saveHint_ = new QLabel(this);
+    saveHint_->setObjectName(QStringLiteral("saveHint"));
+    saveHint_->setWordWrap(true);
+    layout->addWidget(saveHint_);
     if (type_ == DocumentType::Return) {
         auto *hint = new QLabel(QStringLiteral(
-            "工厂退回公司属于内部流转，总库存不变；同一批次的不同型号共用工厂可用数量。"), this);
+            "工厂退回公司属于内部流转，总库存不变；同一批次的不同型号共用工厂账面库存，"
+            "允许零库存或负库存补录。"), this);
         hint->setWordWrap(true);
         layout->addWidget(hint);
     }
@@ -210,7 +215,8 @@ Result<bool> LogisticsDialog::refreshDestinations(EntityId currentDestination,
         if (valid)
             destination_->addItem(location.name, location.id);
     }
-    if (preserveHistorical && selected > 0 && destination_->findData(selected) < 0) {
+    if (preserveHistorical && selected > 0 && selected != sourceId &&
+        destination_->findData(selected) < 0) {
         const auto historical = masterData_.locationById(selected);
         if (!historical.ok()) {
             showError(historical.error());
@@ -229,6 +235,7 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
 {
     id_ = id;
     readOnly_ = readOnly;
+    original_ = {};
     if (outboundConfirmedBy_) {
         outboundConfirmedBy_->clear();
         if (!readOnly_) {
@@ -253,10 +260,12 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
             return Result<bool>::failure({QStringLiteral("invalid_type"),
                                           QStringLiteral("单据类型不匹配"),
                                           QStringLiteral("type")});
-        if (!readOnly && loaded.value().status != DocumentStatus::Draft)
-            return Result<bool>::failure({QStringLiteral("invalid_status"),
-                                          QStringLiteral("仅草稿可编辑"),
-                                          QStringLiteral("status")});
+        original_ = loaded.value();
+        const bool cancelled = loaded.value().status == DocumentStatus::Cancelled;
+        save_->setText(cancelled ? QStringLiteral("保存并恢复生效") : QStringLiteral("保存修改"));
+        saveHint_->setText(cancelled
+            ? QStringLiteral("此记录已作废，保存修改后将恢复生效并重新计入库存。允许负库存，请核对或补录。")
+            : QStringLiteral("保存将更新原记录及其库存影响。允许负库存，请核对或补录。"));
 
         const auto locations = loadLocations(loaded.value().sourceLocationId,
                                              loaded.value().destinationLocationId);
@@ -299,6 +308,8 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
                 return populated;
         }
     } else {
+        save_->setText(QStringLiteral("保存"));
+        saveHint_->setText(QStringLiteral("保存后立即生效。允许负库存，请核对或补录相关记录。"));
         const auto locations = loadLocations();
         if (!locations.ok())
             return locations;
@@ -352,6 +363,7 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
         qobject_cast<QLineEdit *>(lines_->cellWidget(row, 1))->setReadOnly(readOnly_);
     }
     save_->setVisible(!readOnly_);
+    saveHint_->setVisible(!readOnly_);
     updateContentSize();
     return Result<bool>::success(true);
 }
@@ -365,42 +377,29 @@ Result<bool> LogisticsDialog::setSourceLocation(EntityId id)
         showError(value);
         return Result<bool>::failure(value);
     }
-    if (source_->currentIndex() != sourceIndex) {
-        source_->blockSignals(true);
-        source_->setCurrentIndex(sourceIndex);
-        source_->blockSignals(false);
-    }
-    for (int index = source_->count() - 1; index >= 0; --index) {
-        if (source_->itemText(index).contains(QStringLiteral("已停用/历史")) &&
-            source_->itemData(index).toLongLong() != id)
-            source_->removeItem(index);
-    }
-
-    const auto destinations = refreshDestinations();
+    const QSignalBlocker sourceBlocker(source_);
+    source_->setCurrentIndex(sourceIndex);
+    const EntityId destinationId = destination_->currentData().toLongLong();
+    const auto destinations = refreshDestinations(destinationId,
+        destinationId == original_.destinationLocationId);
     if (!destinations.ok())
         return destinations;
     const auto result = loadBatches(id);
     if (!result.ok()) {
-        for (int row = 0; row < lines_->rowCount(); ++row) {
-            for (int column : {0, 2}) {
-                if (auto *combo = qobject_cast<QComboBox *>(lines_->cellWidget(row, column))) {
-                    const QSignalBlocker blocker(combo);
-                    combo->clear();
-                }
-            }
-        }
         showError(result.error());
-        updateContentSize();
         return result;
     }
     for (int row = 0; row < lines_->rowCount(); ++row) {
-        auto *quantity = qobject_cast<QLineEdit *>(lines_->cellWidget(row, 1));
-        bool ok = false;
-        const qint64 amount = quantity ? quantity->text().toLongLong(&ok) : 0;
-        const LogisticsLineDraft line{0, ok ? amount : 0};
-        const auto populated = populateLine(row, line);
-        if (!populated.ok())
-            return populated;
+        auto *batch = qobject_cast<QComboBox *>(lines_->cellWidget(row, 0));
+        const EntityId batchId = batch->currentData().toLongLong();
+        const QString text = batch->currentText();
+        const QSignalBlocker blocker(batch);
+        batch->clear();
+        for (const auto &choice : batches_)
+            batch->addItem(choice.text, choice.id);
+        if (batchId > 0 && batch->findData(batchId) < 0)
+            batch->addItem(text, batchId);
+        batch->setCurrentIndex(batch->findData(batchId));
     }
     updateContentSize();
     return Result<bool>::success(true);
@@ -408,26 +407,29 @@ Result<bool> LogisticsDialog::setSourceLocation(EntityId id)
 
 Result<bool> LogisticsDialog::loadBatches(EntityId locationId)
 {
-    batches_.clear();
-    if (type_ == DocumentType::Return) {
-        const auto rows = service_.returnableLines(locationId);
-        if (!rows.ok()) return Result<bool>::failure(rows.error());
-        for (const auto &row : rows.value()) {
-            batches_.append({row.batchId, row.productTypeId,
-                QStringLiteral("%1 / 物料型号：%2 / 工厂可用 %3")
-                    .arg(row.batchNo, row.materialModel.isEmpty() ? QStringLiteral("未填写") : row.materialModel)
-                    .arg(row.quantity)});
-        }
-    } else {
-        const auto rows = queries_.availableBatches(locationId);
-        if (!rows.ok()) return Result<bool>::failure(rows.error());
-        for (const auto &row : rows.value())
-            batches_.append({row.batchId, row.productTypeId,
-                QStringLiteral("%1 / %2 / 物料型号：%3 / %4")
-                    .arg(row.batchNo, row.typeCode,
-                         row.materialModel.isEmpty() ? QStringLiteral("未填写") : row.materialModel)
-                    .arg(row.quantity)});
+    const auto rows = queries_.availableBatches(locationId);
+    if (!rows.ok()) return Result<bool>::failure(rows.error());
+    QVector<BatchChoice> choices;
+    for (const auto &row : rows.value())
+        choices.append({row.batchId, row.productTypeId,
+            QStringLiteral("%1 / %2 / 物料型号：%3 / 账面库存 %4")
+                .arg(row.batchNo, row.typeCode,
+                     row.materialModel.isEmpty() ? QStringLiteral("未填写") : row.materialModel)
+                .arg(row.quantity)});
+    for (const auto &line : original_.lines) {
+        if (std::any_of(choices.cbegin(), choices.cend(), [&](const BatchChoice &choice) {
+                return choice.id == line.batchId;
+            }))
+            continue;
+        const auto balance = queries_.balance(line.batchId, locationId);
+        if (!balance.ok()) return Result<bool>::failure(balance.error());
+        choices.append({line.batchId, line.productTypeId,
+            QStringLiteral("%1 / %2 / 物料型号：%3 / 账面库存 %4（原记录批次）")
+                .arg(line.batchNoSnapshot, line.typeCodeSnapshot,
+                     line.materialModel.isEmpty() ? QStringLiteral("未填写") : line.materialModel)
+                .arg(balance.value())});
     }
+    batches_ = choices;
     return Result<bool>::success(true);
 }
 
@@ -460,15 +462,10 @@ Result<bool> LogisticsDialog::populateModels(int row, EntityId modelId,
             models->addItem(choice.modelCode, choice.id);
     }
     models->addItem(QStringLiteral("未细分 / 原材料"), EntityId(0));
-    if (persistedLine && models->findData(modelId) < 0) {
-        QString code = persistedLine->modelCodeSnapshot;
-        if (code.isEmpty() && modelId > 0) {
-            const auto historical = masterData_.productModelById(modelId);
-            if (!historical.ok()) return Result<bool>::failure(historical.error());
-            code = historical.value().modelCode;
-        }
-        models->addItem(code.isEmpty() ? QStringLiteral("未细分（历史）")
-                                      : code + QStringLiteral("（已停用/历史）"), modelId);
+    for (const auto &line : original_.lines) {
+        if (line.batchId != batchId || models->findData(line.productModelId) >= 0)
+            continue;
+        models->addItem(line.modelCodeSnapshot + QStringLiteral("（原记录型号）"), line.productModelId);
     }
     const int selected = models->findData(modelId);
     if (modelId >= 0) {
@@ -496,7 +493,7 @@ Result<bool> LogisticsDialog::addLine()
     return result;
 }
 
-Result<bool> LogisticsDialog::populateLine(int row, const LogisticsLineDraft &line,
+Result<bool> LogisticsDialog::populateLine(int row, const LogisticsLineInput &line,
                                             const LogisticsLine *persistedLine)
 {
     if (row >= lines_->rowCount())
@@ -565,7 +562,7 @@ Result<bool> LogisticsDialog::setLineBatch(int row, EntityId batchId)
     return Result<bool>::success(true);
 }
 
-Result<bool> LogisticsDialog::setDraft(const LogisticsDraft &value)
+Result<bool> LogisticsDialog::setInput(const LogisticsInput &value)
 {
     manualNumber_->setChecked(!value.documentNo.trimmed().isEmpty());
     documentNo_->setText(value.documentNo);
@@ -595,9 +592,9 @@ Result<bool> LogisticsDialog::setDraft(const LogisticsDraft &value)
     return Result<bool>::success(true);
 }
 
-LogisticsDraft LogisticsDialog::draft() const
+LogisticsInput LogisticsDialog::input() const
 {
-    LogisticsDraft value{documentNo_->text(), type_, source_->currentData().toLongLong(),
+    LogisticsInput value{documentNo_->text(), type_, source_->currentData().toLongLong(),
                          destination_->currentData().toLongLong(), businessAt_->dateTime(),
                          note_->toPlainText(), {},
                          outboundConfirmedBy_ ? outboundConfirmedBy_->currentData().toLongLong() : 0};
@@ -622,9 +619,9 @@ bool LogisticsDialog::save()
         return false;
     }
     const auto result = id_
-        ? service_.updateDraft(id_, draft())
+        ? service_.update(id_, input())
         : [&] {
-              const auto created = service_.createDraft(draft());
+              const auto created = service_.create(input());
               return created.ok() ? Result<bool>::success(true)
                                   : Result<bool>::failure(created.error());
           }();

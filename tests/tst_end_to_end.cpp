@@ -7,6 +7,7 @@
 #include "services/master_data_service.h"
 #include "test_support.h"
 
+#include <algorithm>
 #include <memory>
 #include <QtTest>
 
@@ -15,16 +16,15 @@ class EndToEndTest : public QObject {
 private slots:
     void init();
     void completesThe820ItemWorkflow();
-    void failedOutboundIsAtomic();
+    void outboundShortageIsSaved();
     void splitShipmentReturnAndReprocess();
-    void rejectsOverIssueAcrossModelsAndExcessReturns();
+    void allowsOverIssueAcrossModelsAndSupplementalReturns();
     void returnFailureRollsBackAllChanges();
 private:
     EntityId location(const QString &name, LocationType type, bool inventory);
-    Result<EntityId> logisticsDraft(const QString &number, DocumentType type,
-                                    EntityId source, EntityId destination,
-                                    EntityId batch, qint64 quantity);
-
+    Result<EntityId> saveLogistics(const QString &number, DocumentType type,
+                                   EntityId source, EntityId destination,
+                                   EntityId batch, qint64 quantity);
     std::unique_ptr<TestDatabase> db;
     std::unique_ptr<MasterDataRepository> masterRepository;
     std::unique_ptr<MasterDataService> master;
@@ -34,12 +34,12 @@ private:
     std::unique_ptr<LogisticsService> logistics;
     std::unique_ptr<InventoryQueryService> queries;
     EntityId productTypeId=0, companyId=0, factoryAId=0;
-    EntityId factoryBId=0, externalId=0, batchId=0;
+    EntityId factoryBId=0, externalId=0, batchId=0, personId=0;
 };
 
 void EndToEndTest::init()
 {
-    db=std::make_unique<TestDatabase>();QVERIFY(db->openAndMigrate());
+    db=std::make_unique<TestDatabase>(); QVERIFY(db->openAndMigrate());
     masterRepository=std::make_unique<MasterDataRepository>(db->database());
     master=std::make_unique<MasterDataService>(*masterRepository);
     documents=std::make_unique<DocumentRepository>(db->database());
@@ -47,47 +47,61 @@ void EndToEndTest::init()
     inbound=std::make_unique<InboundService>(db->database(),*masterRepository,*documents,*inventory);
     logistics=std::make_unique<LogisticsService>(db->database(),*masterRepository,*documents,*inventory);
     queries=std::make_unique<InventoryQueryService>(db->database());
-    const auto category=master->createCategory(QStringLiteral("设备"));QVERIFY(category.ok());
-    const auto productType=master->createProductType(category.value().id,QStringLiteral("GW-820"),{});QVERIFY(productType.ok());productTypeId=productType.value().id;
+    const auto category=master->createCategory(QStringLiteral("设备")); QVERIFY(category.ok());
+    const auto product=master->createProductType(category.value().id,QStringLiteral("GW-820"),{});
+    QVERIFY(product.ok()); productTypeId=product.value().id;
     companyId=location(QStringLiteral("公司仓"),LocationType::Company,true);
     factoryAId=location(QStringLiteral("工厂 A"),LocationType::Factory,true);
     factoryBId=location(QStringLiteral("工厂 B"),LocationType::Factory,true);
-    externalId=location(QStringLiteral("客户现场"),LocationType::Customer,false);
-    const auto batch=inbound->createDraft({QStringLiteral("B-820"),productTypeId,820,companyId,QDateTime(QDate(2026,9,1),QTime(8,0)),{}});QVERIFY(batch.ok());batchId=batch.value();QVERIFY(inbound->confirm(batchId).ok());
+    externalId=location(QStringLiteral("Amazon"),LocationType::Other,false);
+    const auto person=master->createPersonnel(QStringLiteral("经办人")); QVERIFY(person.ok());
+    personId=person.value().id;
+    const auto batch=inbound->create({QStringLiteral("B-820"),productTypeId,820,companyId,
+        QDateTime(QDate(2026,9,1),QTime(8,0)),{},QStringLiteral("V40"),personId});
+    QVERIFY(batch.ok()); batchId=batch.value();
 }
 
 EntityId EndToEndTest::location(const QString &name, LocationType type, bool inventoryFlag)
 {
-    const auto result=master->createLocation(name,type,inventoryFlag);return result.ok()?result.value().id:0;
+    const auto result=master->createLocation(name,type,inventoryFlag);
+    return result.ok()?result.value().id:0;
 }
 
-Result<EntityId> EndToEndTest::logisticsDraft(const QString &number,DocumentType type,
-    EntityId source,EntityId destination,EntityId batch,qint64 quantity)
+Result<EntityId> EndToEndTest::saveLogistics(const QString &number, DocumentType type,
+    EntityId source, EntityId destination, EntityId batch, qint64 quantity)
 {
-    return logistics->createDraft({number,type,source,destination,QDateTime(QDate(2026,9,2),QTime(8,0)),{},{{batch,quantity}}});
+    return logistics->create({number,type,source,destination,QDateTime(QDate(2026,9,2),QTime(8,0)),{},
+        {{batch,quantity}},type==DocumentType::Outbound?personId:0});
 }
 
 void EndToEndTest::completesThe820ItemWorkflow()
 {
-    const auto toA=logisticsDraft(QStringLiteral("T-A"),DocumentType::Transfer,companyId,factoryAId,batchId,500);QVERIFY(toA.ok());QVERIFY(logistics->confirm(toA.value()).ok());
-    const auto toB=logisticsDraft(QStringLiteral("T-B"),DocumentType::Transfer,companyId,factoryBId,batchId,320);QVERIFY(toB.ok());QVERIFY(logistics->confirm(toB.value()).ok());
-    const auto outA=logisticsDraft(QStringLiteral("O-A"),DocumentType::Outbound,factoryAId,externalId,batchId,250);QVERIFY(outA.ok());QVERIFY(logistics->confirm(outA.value()).ok());
-    const auto outB=logisticsDraft(QStringLiteral("O-B"),DocumentType::Outbound,factoryBId,externalId,batchId,100);QVERIFY(outB.ok());QVERIFY(logistics->confirm(outB.value()).ok());
+    QVERIFY(saveLogistics(QStringLiteral("T-A"),DocumentType::Transfer,companyId,factoryAId,batchId,500).ok());
+    QVERIFY(saveLogistics(QStringLiteral("T-B"),DocumentType::Transfer,companyId,factoryBId,batchId,320).ok());
+    QVERIFY(saveLogistics(QStringLiteral("O-A"),DocumentType::Outbound,factoryAId,externalId,batchId,250).ok());
+    QVERIFY(saveLogistics(QStringLiteral("O-B"),DocumentType::Outbound,factoryBId,externalId,batchId,100).ok());
     QCOMPARE(inventory->quantity(batchId,companyId),qint64(0));
     QCOMPARE(inventory->quantity(batchId,factoryAId),qint64(250));
     QCOMPARE(inventory->quantity(batchId,factoryBId),qint64(220));
     QCOMPARE(inventory->quantity(batchId,externalId),qint64(0));
-    const auto remaining=queries->batchRemaining(batchId);QVERIFY(remaining.ok());QCOMPARE(remaining.value(),qint64(470));
-    const auto dashboard=queries->dashboardSummary(QDate(2026,9,1));QVERIFY(dashboard.ok());QCOMPARE(dashboard.value().totalInventory,qint64(470));QCOMPARE(dashboard.value().companyInventory,qint64(0));QCOMPARE(dashboard.value().factoryInventory,qint64(470));
+    QCOMPARE(queries->batchRemaining(batchId).value(),qint64(470));
+    const auto dashboard=queries->dashboardSummary(QDate(2026,9,1)); QVERIFY(dashboard.ok());
+    QCOMPARE(dashboard.value().totalInventory,qint64(470));
+    QCOMPARE(dashboard.value().companyInventory,qint64(0));
+    QCOMPARE(dashboard.value().factoryInventory,qint64(470));
 }
 
-void EndToEndTest::failedOutboundIsAtomic()
+void EndToEndTest::outboundShortageIsSaved()
 {
-    const auto failed=logisticsDraft(QStringLiteral("O-FAIL"),DocumentType::Outbound,companyId,externalId,batchId,821);QVERIFY(failed.ok());
-    const auto result=logistics->confirm(failed.value());QVERIFY(!result.ok());QCOMPARE(result.error().code,QStringLiteral("insufficient_stock"));
-    const auto saved=documents->logisticsById(failed.value());QVERIFY(saved.ok());QCOMPARE(saved.value().status,DocumentStatus::Draft);
+    const auto saved=saveLogistics(QStringLiteral("O-SUPPLEMENT"),DocumentType::Outbound,
+        factoryAId,externalId,batchId,821);
+    QVERIFY(saved.ok());
+    QCOMPARE(documents->logisticsById(saved.value()).value().status,DocumentStatus::Confirmed);
     QCOMPARE(inventory->quantity(batchId,companyId),qint64(820));
-    const auto entries=inventory->entriesForSourceResult(QStringLiteral("Logistics"),failed.value());QVERIFY(entries.ok());QVERIFY(entries.value().isEmpty());
+    QCOMPARE(inventory->quantity(batchId,factoryAId),qint64(-821));
+    QCOMPARE(queries->batchRemaining(batchId).value(),qint64(-1));
+    QCOMPARE(queries->negativeBalanceCount().value(),qint64(1));
+    QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"),saved.value()).size(),1);
 }
 
 void EndToEndTest::splitShipmentReturnAndReprocess()
@@ -96,123 +110,107 @@ void EndToEndTest::splitShipmentReturnAndReprocess()
     const auto p25 = master->createProductModel(productTypeId, QStringLiteral("P25"), {});
     QVERIFY(f25.ok() && p25.ok());
     const QDateTime at(QDate(2026, 9, 2), QTime(8, 0));
-    const auto sent = logistics->createDraft({QStringLiteral("O-SPLIT"), DocumentType::Outbound,
-        companyId, externalId, at, {}, {{batchId, 500, f25.value().id}, {batchId, 320, p25.value().id}}});
+    QVERIFY(saveLogistics(QStringLiteral("T-SPLIT"),DocumentType::Transfer,companyId,factoryAId,batchId,820).ok());
+    LogisticsInput sentInput{QStringLiteral("O-SPLIT"), DocumentType::Outbound,
+        factoryAId, externalId, at, {}, {{batchId, 500, f25.value().id}, {batchId, 320, p25.value().id}}, personId};
+    const auto sent = logistics->create(sentInput);
     QVERIFY(sent.ok());
-    QVERIFY(logistics->confirm(sent.value()).ok());
     QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
-    QCOMPARE(documents->logisticsById(sent.value()).value().lines.front().productModelId, f25.value().id);
-
+    LogisticsInput returnInput{QStringLiteral("R-50"), DocumentType::Return,
+        factoryAId, companyId, at.addDays(1), {}, {{batchId, 50, f25.value().id}}};
+    const auto received = logistics->create(returnInput);
+    QVERIFY(received.ok());
     QVERIFY(master->updateProductModel(f25.value().id, productTypeId, QStringLiteral("F25-NEW"), {}).ok());
     QVERIFY(master->setProductModelEnabled(f25.value().id, false).ok());
-    const auto received = logistics->createDraft({QStringLiteral("R-50"), DocumentType::Return,
-        externalId, companyId, at.addDays(1), {}, {{batchId, 50, f25.value().id}}});
-    QVERIFY(received.ok());
     QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
-    QVERIFY(logistics->confirm(received.value()).ok());
-    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(50));
-    const auto saved = documents->logisticsById(received.value());
-    QVERIFY(saved.ok());
-    QCOMPARE(saved.value().type, DocumentType::Return);
-    QCOMPARE(saved.value().lines.front().modelCodeSnapshot, QStringLiteral("F25"));
+    QCOMPARE(documents->logisticsById(received.value()).value().lines.front().modelCodeSnapshot, QStringLiteral("F25"));
     QCOMPARE(inventory->quantity(batchId, externalId), qint64(0));
-    QCOMPARE(logistics->cancel(sent.value()).error().code, QStringLiteral("return_dependency"));
-
-    const auto resent = logistics->createDraft({QStringLiteral("O-REWORK"), DocumentType::Outbound,
-        companyId, externalId, at.addDays(2), {}, {{batchId, 30, p25.value().id}}});
+    QVERIFY(logistics->cancel(sent.value()).ok());
+    QVERIFY(logistics->update(sent.value(), sentInput).ok());
+    const auto resent = logistics->create({QStringLiteral("O-REWORK"), DocumentType::Outbound,
+        factoryAId, externalId, at.addDays(2), {}, {{batchId, 30, p25.value().id}}, personId});
     QVERIFY(resent.ok());
-    QVERIFY(logistics->confirm(resent.value()).ok());
-    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(20));
-    QCOMPARE(logistics->cancel(received.value()).error().code, QStringLiteral("stock_dependency"));
-
-    const auto summary = queries->productTypeShipmentSummary({QDate(2026, 9, 1), QDate(2026, 9, 30)});
+    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(-30));
+    QVERIFY(logistics->cancel(received.value()).ok());
+    QVERIFY(logistics->update(received.value(), returnInput).ok());
+    const auto summary = queries->productTypeShipmentSummary({QDate(2026,9,1),QDate(2026,9,30)});
     QVERIFY(summary.ok());
     QCOMPARE(summary.value().size(), 2);
-    QCOMPARE(summary.value().at(0).modelCode, QStringLiteral("F25"));
+    QCOMPARE(summary.value().at(0).modelCode, QStringLiteral("F25-NEW"));
     QCOMPARE(summary.value().at(0).quantity, qint64(500));
     QCOMPARE(summary.value().at(0).returnedQuantity, qint64(50));
     QCOMPARE(summary.value().at(1).quantity, qint64(350));
-    const auto dashboard = queries->dashboardSummary(QDate(2026, 9, 1));
+    const auto dashboard = queries->dashboardSummary(QDate(2026,9,1));
     QVERIFY(dashboard.ok());
-    QCOMPARE(dashboard.value().totalInventory, qint64(20));
+    QCOMPARE(dashboard.value().totalInventory, qint64(-30));
     QCOMPARE(dashboard.value().monthlyOutbound, qint64(850));
     QCOMPARE(dashboard.value().monthlyReturned, qint64(50));
     const auto timeline = queries->batchTimeline(batchId);
     QVERIFY(timeline.ok());
-    QCOMPARE(timeline.value().at(3).direction, QStringLiteral("退回入库"));
-    QCOMPARE(timeline.value().at(3).modelCode, QStringLiteral("F25"));
-
+    QVERIFY(std::any_of(timeline.value().cbegin(), timeline.value().cend(), [](const BatchTimelineItem &item) {
+        return item.direction == QStringLiteral("退回接收") && item.modelCode == QStringLiteral("F25-NEW");
+    }));
     QVERIFY(logistics->cancel(resent.value()).ok());
     QVERIFY(logistics->cancel(received.value()).ok());
     QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
-    const auto copy = logistics->copyToDraft(received.value());
-    QVERIFY(copy.ok());
-    QCOMPARE(documents->logisticsById(copy.value()).value().lines.front().productModelId, f25.value().id);
+    QVERIFY(logistics->update(received.value(), returnInput).ok());
+    QCOMPARE(documents->logisticsById(received.value()).value().lines.front().productModelId, f25.value().id);
     QVERIFY(logistics->cancel(sent.value()).ok());
     QCOMPARE(queries->batchRemaining(batchId).value(), qint64(820));
 }
 
-void EndToEndTest::rejectsOverIssueAcrossModelsAndExcessReturns()
+void EndToEndTest::allowsOverIssueAcrossModelsAndSupplementalReturns()
 {
     const auto f25 = master->createProductModel(productTypeId, QStringLiteral("F25"), {});
     const auto p25 = master->createProductModel(productTypeId, QStringLiteral("P25"), {});
     QVERIFY(f25.ok() && p25.ok());
-    const QDateTime at(QDate(2026, 9, 2), QTime(8, 0));
-    LogisticsDraft value{QStringLiteral("O-OVER"), DocumentType::Outbound, companyId, externalId,
-        at, {}, {{batchId, 500, f25.value().id}, {batchId, 321, p25.value().id}}};
-    const auto sent = logistics->createDraft(value);
+    const QDateTime at(QDate(2026,9,2),QTime(8,0));
+    LogisticsInput value{QStringLiteral("O-OVER"),DocumentType::Outbound,factoryAId,externalId,
+        at,{},{{batchId,500,f25.value().id},{batchId,321,p25.value().id}},personId};
+    const auto sent=logistics->create(value);
     QVERIFY(sent.ok());
-    QCOMPARE(logistics->confirm(sent.value()).error().code, QStringLiteral("insufficient_stock"));
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), sent.value()).isEmpty());
-    value.lines.back().quantity = 320;
-    QVERIFY(logistics->updateDraft(sent.value(), value).ok());
-    QVERIFY(logistics->confirm(sent.value()).ok());
-
-    const auto first = logistics->createDraft({QStringLiteral("R-FIRST"), DocumentType::Return,
-        externalId, companyId, at, {}, {{batchId, 490, f25.value().id}}});
-    const auto second = logistics->createDraft({QStringLiteral("R-EXCESS"), DocumentType::Return,
-        externalId, companyId, at, {}, {{batchId, 11, f25.value().id}}});
+    QCOMPARE(queries->batchRemaining(batchId).value(),qint64(-1));
+    value.lines.back().quantity=320;
+    QVERIFY(logistics->update(sent.value(),value).ok());
+    QCOMPARE(queries->batchRemaining(batchId).value(),qint64(0));
+    const auto first=logistics->create({QStringLiteral("R-FIRST"),DocumentType::Return,
+        factoryAId,companyId,at,{},{{batchId,490,f25.value().id}}});
+    const auto second=logistics->create({QStringLiteral("R-SUPPLEMENT"),DocumentType::Return,
+        factoryAId,companyId,at,{},{{batchId,11,f25.value().id}}});
     QVERIFY(first.ok() && second.ok());
-    QVERIFY(logistics->confirm(first.value()).ok());
-    QCOMPARE(logistics->confirm(second.value()).error().code, QStringLiteral("excess_return"));
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), second.value()).isEmpty());
-    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(490));
-
-    const EntityId stranger = location(QStringLiteral("另一个客户"), LocationType::Customer, false);
-    const auto wrongSource = logistics->createDraft({QStringLiteral("R-WRONG"), DocumentType::Return,
-        stranger, companyId, at, {}, {{batchId, 1, f25.value().id}}});
-    QVERIFY(wrongSource.ok());
-    QCOMPARE(logistics->confirm(wrongSource.value()).error().code, QStringLiteral("excess_return"));
-    const auto category = master->createCategory(QStringLiteral("其他产品"));
-    QVERIFY(category.ok());
-    const auto otherType = master->createProductType(category.value().id, QStringLiteral("OTHER"), {});
-    QVERIFY(otherType.ok());
-    const auto wrongModel = master->createProductModel(otherType.value().id, QStringLiteral("F25"), {});
-    QVERIFY(wrongModel.ok());
-    const auto invalid = logistics->createDraft({QStringLiteral("O-WRONG"), DocumentType::Outbound,
-        companyId, externalId, at, {}, {{batchId, 1, wrongModel.value().id}}});
-    QVERIFY(invalid.ok());
-    QCOMPARE(logistics->confirm(invalid.value()).error().field, QStringLiteral("lines[0].productModelId"));
+    QCOMPARE(queries->batchRemaining(batchId).value(),qint64(0));
+    const EntityId stranger=location(QStringLiteral("外部地点"),LocationType::Customer,false);
+    const auto wrongSource=logistics->create({QStringLiteral("R-WRONG"),DocumentType::Return,
+        stranger,companyId,at,{},{{batchId,1,f25.value().id}}});
+    QVERIFY(!wrongSource.ok());
+    QCOMPARE(wrongSource.error().field,QStringLiteral("sourceLocationId"));
+    const auto category=master->createCategory(QStringLiteral("其他产品")); QVERIFY(category.ok());
+    const auto type=master->createProductType(category.value().id,QStringLiteral("OTHER"),{}); QVERIFY(type.ok());
+    const auto model=master->createProductModel(type.value().id,QStringLiteral("F25"),{}); QVERIFY(model.ok());
+    const auto invalid=logistics->create({QStringLiteral("O-WRONG"),DocumentType::Outbound,
+        factoryAId,externalId,at,{},{{batchId,1,model.value().id}},personId});
+    QVERIFY(!invalid.ok());
+    QCOMPARE(invalid.error().field,QStringLiteral("lines[0].productModelId"));
 }
 
 void EndToEndTest::returnFailureRollsBackAllChanges()
 {
-    const auto sent = logisticsDraft(QStringLiteral("O-RAW"), DocumentType::Outbound,
-                                     companyId, externalId, batchId, 820);
-    QVERIFY(sent.ok());
-    QVERIFY(logistics->confirm(sent.value()).ok());
-    const auto received = logisticsDraft(QStringLiteral("R-RAW"), DocumentType::Return,
-                                         externalId, companyId, batchId, 50);
+    QVERIFY(saveLogistics(QStringLiteral("O-RAW"),DocumentType::Outbound,factoryAId,externalId,batchId,820).ok());
+    const auto received=saveLogistics(QStringLiteral("R-RAW"),DocumentType::Return,factoryAId,companyId,batchId,50);
     QVERIFY(received.ok());
     QVERIFY(db->execute(QStringLiteral(
         "CREATE TRIGGER abort_return BEFORE UPDATE OF status ON logistics_documents "
         "WHEN NEW.type='Return' AND NEW.status='Confirmed' "
         "BEGIN SELECT RAISE(ABORT,'forced return failure'); END")));
-    QCOMPARE(logistics->confirm(received.value()).error().code, QStringLiteral("database"));
-    QCOMPARE(documents->logisticsById(received.value()).value().status, DocumentStatus::Draft);
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), received.value()).isEmpty());
-    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
-    QCOMPARE(logistics->returnableLines(externalId).value().front().quantity, qint64(820));
+    LogisticsInput changed{QStringLiteral("R-RAW"),DocumentType::Return,factoryAId,companyId,
+        QDateTime(QDate(2026,9,2),QTime(8,0)),{},{{batchId,60}}};
+    const auto result=logistics->update(received.value(),changed);
+    QVERIFY(!result.ok());
+    QCOMPARE(result.error().code,QStringLiteral("database"));
+    QCOMPARE(documents->logisticsById(received.value()).value().lines.front().quantity,qint64(50));
+    QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"),received.value()).size(),2);
+    QCOMPARE(queries->batchRemaining(batchId).value(),qint64(0));
+    QCOMPARE(queries->balance(batchId,factoryAId).value(),qint64(-870));
 }
 
 QTEST_MAIN(EndToEndTest)

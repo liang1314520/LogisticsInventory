@@ -28,8 +28,8 @@ public:
     QVector<EntityId> visibleBatchIds() const;
     Result<bool> addLine();
     Result<bool> setLineBatch(int row, EntityId batchId);
-    Result<bool> setDraft(const LogisticsDraft &draft);
-    LogisticsDraft draft() const;
+    Result<bool> setInput(const LogisticsInput &input);
+    LogisticsInput input() const;
     bool save();
     bool isReadOnly() const;
 
@@ -49,7 +49,7 @@ private:
     Result<bool> loadBatches(EntityId locationId);
     Result<bool> populateModels(int row, EntityId modelId = -1,
                                 const LogisticsLine *persistedLine = nullptr);
-    Result<bool> populateLine(int row, const LogisticsLineDraft &line,
+    Result<bool> populateLine(int row, const LogisticsLineInput &line,
                               const LogisticsLine *persistedLine = nullptr);
     Result<bool> refreshDestinations(EntityId currentDestination = 0,
                                      bool preserveHistorical = false);
@@ -64,6 +64,7 @@ private:
     bool readOnly_ = false;
     QString originalNumber_;
     QVector<BatchChoice> batches_;
+    LogisticsDocument original_;
     QLineEdit *documentNo_ = nullptr;
     QCheckBox *manualNumber_ = nullptr;
     QComboBox *source_ = nullptr;
@@ -72,6 +73,7 @@ private:
     QComboBox *outboundConfirmedBy_ = nullptr;
     QTextEdit *note_ = nullptr;
     QTableWidget *lines_ = nullptr;
+    QLabel *saveHint_ = nullptr;
     QLabel *error_ = nullptr;
     QPushButton *add_ = nullptr;
     QPushButton *remove_ = nullptr;

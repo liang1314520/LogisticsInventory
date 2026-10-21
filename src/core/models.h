@@ -5,7 +5,7 @@
 
 using EntityId = qint64;
 
-enum class DocumentStatus { Draft, Confirmed, Cancelled };
+enum class DocumentStatus { Confirmed, Cancelled };
 // Return：工厂退回公司，双方均计库存，总库存不变。
 enum class DocumentType { Transfer, Outbound, Return };
 enum class LocationType { Company, Factory, Customer, ProjectSite, Other };

@@ -38,10 +38,7 @@ private slots:
     void updateActions();
     void editSelected();
     void viewSelected();
-    void deleteSelected();
-    void confirmSelected();
     void cancelSelected();
-    void copySelected();
 
 private:
     EntityId selectedId() const;
@@ -55,10 +52,7 @@ private:
     EntityId currentBatchId_ = 0;
     QPushButton *edit_ = nullptr;
     QPushButton *view_ = nullptr;
-    QPushButton *remove_ = nullptr;
-    QPushButton *confirm_ = nullptr;
     QPushButton *cancel_ = nullptr;
-    QPushButton *copy_ = nullptr;
     std::function<bool(const QString &)> confirmation_;
     ServiceError lastError_;
 };

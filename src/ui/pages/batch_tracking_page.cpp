@@ -113,7 +113,16 @@ Result<bool> BatchTrackingPage::loadSelected()
     const EntityId id=selector_->currentData().toLongLong(); if(!id)return Result<bool>::success(true);
     const auto distribution=service_.batchLocationBalances(id); if(!distribution.ok()){showError(distribution.error());return Result<bool>::failure(distribution.error());}
     const auto timeline=service_.batchTimeline(id); if(!timeline.ok()){showError(timeline.error());return Result<bool>::failure(timeline.error());}
-    distribution_->setRowCount(distribution.value().size());for(int row=0;row<distribution.value().size();++row){const auto &v=distribution.value().at(row);setCells(distribution_,row,{v.locationName,QString::number(v.quantity)});}
+    bool hasNegative = false;
+    distribution_->setRowCount(distribution.value().size());
+    for (int row = 0; row < distribution.value().size(); ++row) {
+        const auto &value = distribution.value().at(row);
+        setCells(distribution_, row, {value.locationName, QString::number(value.quantity)});
+        if (value.quantity < 0) {
+            hasNegative = true;
+            StatusPresentation::apply(distribution_->item(row, 1), StatusPresentation::Tone::Attention);
+        }
+    }
     timeline_->setRowCount(timeline.value().size());
     for (int row = 0; row < timeline.value().size(); ++row) {
         const auto &v = timeline.value().at(row);
@@ -139,8 +148,13 @@ Result<bool> BatchTrackingPage::loadSelected()
         summary_->setText(QStringLiteral("%1 / %2 / %3 / 物料型号：%4 / %5")
             .arg(v.batchNo, v.categoryName, v.typeCode,
                  v.materialModel.isEmpty() ? QStringLiteral("未填写") : v.materialModel)
-            .arg(remaining.value()));
+            .arg(remaining.value()) + (hasNegative
+                ? QStringLiteral(" / 存在负库存，需核对或补录") : QString()));
     }
+    if (hasNegative)
+        StatusPresentation::apply(summary_, StatusPresentation::Tone::Attention);
+    else
+        summary_->setStyleSheet({});
     error_->clear();
     return Result<bool>::success(true);
 }

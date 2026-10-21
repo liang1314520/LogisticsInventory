@@ -30,32 +30,32 @@ class DocumentDialogsTest : public QObject {
 private slots:
     void init();
     void inboundFiltersDisabledAndAcceptsQint64();
-    void inboundCreatesAndUpdatesDraft();
+    void inboundCreatesAndUpdatesRecord();
     void inboundFocusesInvalidFieldAndLoadsDisabledReference();
     void newDialogsFilterDisabledLocations();
     void logisticsFiltersBatchesAndDestinations();
-    void transferSourceChangeDropsMatchingDestinationHistory();
-    void transferSourceChangeDropsUnavailableLineBatch();
-    void sourceQueryFailureClearsStaleLineChoices();
+    void transferSourceChangeKeepsFactoryDestination();
+    void transferSourceChangePreservesLine();
+    void sourceQueryFailurePreservesLineChoices();
     void deletingEarlierLineKeepsCascadeBoundToCurrentRow();
     void newLineLoadsDefaultBatch();
     void logisticsDialogPreselectsPreferredBatch();
     void pageRequestSignalsEmitOnce();
-    void logisticsCreatesAndUpdatesDraft();
-    void logisticsRejectsEditingNonDrafts();
+    void logisticsCreatesAndUpdatesRecord();
+    void logisticsEditsConfirmedAndCancelledRecords();
     void logisticsLoadsDisabledHistoricalLocations();
     void logisticsLoadsZeroBalanceHistoricalLineReadOnly();
     void logisticsFocusesExactLineField();
     void logisticsQueryErrorsPropagate();
     void logisticsDestinationQueryErrorsPropagate();
     void logisticsPreservesMultipleLinesAndReadOnlyState();
-    void shortageContainsBusinessDetailsAndExactField();
+    void shortageSavesNegativeBalance();
     void inboundPageExposesDialogInitializeFailures_data();
     void inboundPageExposesDialogInitializeFailures();
     void logisticsPageExposesDialogInitializeFailures_data();
     void logisticsPageExposesDialogInitializeFailures();
     void pagesExposeFailuresAndClearErrorsOnSuccess();
-    void logisticsPageConfirmationAndDataChanged();
+    void logisticsPageCancellationAndDataChanged();
     void pageConfirmationAndDataChanged();
     void outboundModelCascadeAndZeroStockReturn();
 private:
@@ -76,6 +76,7 @@ private:
     EntityId destinationId = 0;
     EntityId externalId = 0;
     EntityId batchId = 0;
+    EntityId personId = 0;
 };
 
 void DocumentDialogsTest::init()
@@ -89,16 +90,20 @@ void DocumentDialogsTest::init()
     inbound = std::make_unique<InboundService>(db->database(), *masterRepository, *documents, *inventory);
     logistics = std::make_unique<LogisticsService>(db->database(), *masterRepository, *documents, *inventory);
     queries = std::make_unique<InventoryQueryService>(db->database());
-    const auto category = master->createCategory(QStringLiteral("设备")); QVERIFY(category.ok());
+    const auto category = master->createCategory(QStringLiteral("设备"));
+    QVERIFY(category.ok());
     categoryId = category.value().id;
     const auto productType = master->createProductType(categoryId, QStringLiteral("GW"), {});
-    QVERIFY(productType.ok()); productTypeId = productType.value().id;
+    QVERIFY(productType.ok());
+    productTypeId = productType.value().id;
     sourceId = addLocation(QStringLiteral("公司仓"), true);
-    destinationId = addLocation(QStringLiteral("项目仓"), true, LocationType::ProjectSite);
-    externalId = addLocation(QStringLiteral("客户"), false, LocationType::Customer);
-    const auto created = inbound->createDraft({QStringLiteral("B-1"), productTypeId, 5000000000LL,
-        sourceId, QDateTime::currentDateTime(), {}});
-    QVERIFY(created.ok()); batchId = created.value(); QVERIFY(inbound->confirm(batchId).ok());
+    destinationId = addLocation(QStringLiteral("工厂仓"), true, LocationType::Factory);
+    externalId = addLocation(QStringLiteral("Amazon"), false, LocationType::Other);
+    const auto person = master->createPersonnel(QStringLiteral("经办人"));
+    QVERIFY(person.ok());
+    personId = person.value().id;
+    batchId = addConfirmedBatch(QStringLiteral("B-1"), 5000000000LL);
+    QVERIFY(batchId > 0);
 }
 
 EntityId DocumentDialogsTest::addLocation(const QString &name, bool inventory, LocationType type)
@@ -109,34 +114,35 @@ EntityId DocumentDialogsTest::addLocation(const QString &name, bool inventory, L
 
 EntityId DocumentDialogsTest::addConfirmedBatch(const QString &batchNo, qint64 quantity)
 {
-    const auto created = inbound->createDraft({batchNo, productTypeId, quantity, sourceId,
-        QDateTime::currentDateTime(), {}});
-    if (!created.ok() || !inbound->confirm(created.value()).ok())
-        return 0;
-    return created.value();
+    const auto created = inbound->create({batchNo, productTypeId, quantity, sourceId,
+        QDateTime::currentDateTime(), {}, QStringLiteral("V40"), personId});
+    return created.ok() ? created.value() : 0;
 }
 
 void DocumentDialogsTest::inboundFiltersDisabledAndAcceptsQint64()
 {
     const auto disabled = master->createProductType(categoryId, QStringLiteral("OFF"), {});
-    QVERIFY(disabled.ok()); QVERIFY(master->setProductTypeEnabled(disabled.value().id, false).ok());
+    QVERIFY(disabled.ok());
+    QVERIFY(master->setProductTypeEnabled(disabled.value().id, false).ok());
     InboundDialog dialog(*master, *inbound);
     QVERIFY(dialog.initialize().ok());
     auto *productTypes = dialog.findChild<QComboBox *>(QStringLiteral("productTypeId"));
-    QVERIFY(productTypes); QCOMPARE(productTypes->findData(disabled.value().id), -1);
-    dialog.setDraft({QStringLiteral("B-LARGE"), productTypeId, 5000000000LL,
-                     sourceId, QDateTime::currentDateTime(), {}});
-    QCOMPARE(dialog.draft().quantity, 5000000000LL);
+    QVERIFY(productTypes);
+    QCOMPARE(productTypes->findData(disabled.value().id), -1);
+    dialog.setInput({QStringLiteral("B-LARGE"), productTypeId, 5000000000LL,
+        sourceId, QDateTime::currentDateTime(), {}, QStringLiteral("V40"), personId});
+    QCOMPARE(dialog.input().quantity, 5000000000LL);
     QVERIFY(qobject_cast<QLineEdit *>(dialog.findChild<QWidget *>(QStringLiteral("quantity"))));
 }
 
-void DocumentDialogsTest::inboundCreatesAndUpdatesDraft()
+void DocumentDialogsTest::inboundCreatesAndUpdatesRecord()
 {
+    const EntityId otherCompany = addLocation(QStringLiteral("备用公司仓"), true);
     InboundDialog create(*master, *inbound);
     QVERIFY(create.initialize().ok());
-    create.setDraft({QStringLiteral("B-CREATE"), productTypeId, 23, destinationId,
-                     QDateTime::fromString(QStringLiteral("2026-09-10T08:30:00"), Qt::ISODate),
-                     QStringLiteral("created")});
+    create.setInput({QStringLiteral("B-CREATE"), productTypeId, 23, otherCompany,
+        QDateTime::fromString(QStringLiteral("2026-09-10T08:30:00"), Qt::ISODate),
+        QStringLiteral("created"), QStringLiteral("V40"), personId});
     QVERIFY(create.save());
     const auto listed = inbound->list();
     QVERIFY(listed.ok());
@@ -145,13 +151,13 @@ void DocumentDialogsTest::inboundCreatesAndUpdatesDraft()
         [](const InboundBatch &item) { return item.batchNo == QStringLiteral("B-CREATE"); });
     QVERIFY(created != listed.value().cend());
     QCOMPARE(created->quantity, qint64(23));
-    QCOMPARE(created->initialLocationId, destinationId);
-
+    QCOMPARE(created->initialLocationId, otherCompany);
+    QCOMPARE(created->status, DocumentStatus::Confirmed);
     InboundDialog update(*master, *inbound);
     QVERIFY(update.initialize(created->id).ok());
-    update.setDraft({QStringLiteral("B-UPDATED"), productTypeId, 29, sourceId,
-                     QDateTime::fromString(QStringLiteral("2026-09-11T09:45:00"), Qt::ISODate),
-                     QStringLiteral("updated")});
+    update.setInput({QStringLiteral("B-UPDATED"), productTypeId, 29, sourceId,
+        QDateTime::fromString(QStringLiteral("2026-09-11T09:45:00"), Qt::ISODate),
+        QStringLiteral("updated"), QStringLiteral("V40"), personId});
     QVERIFY(update.save());
     const auto loaded = inbound->byId(created->id);
     QVERIFY(loaded.ok());
@@ -159,22 +165,26 @@ void DocumentDialogsTest::inboundCreatesAndUpdatesDraft()
     QCOMPARE(loaded.value().quantity, qint64(29));
     QCOMPARE(loaded.value().initialLocationId, sourceId);
     QCOMPARE(loaded.value().note, QStringLiteral("updated"));
+    QCOMPARE(queries->balance(created->id, sourceId).value(), qint64(29));
+    QCOMPARE(queries->balance(created->id, otherCompany).value(), qint64(0));
 }
 
 void DocumentDialogsTest::inboundFocusesInvalidFieldAndLoadsDisabledReference()
 {
-    const auto created = inbound->createDraft({QStringLiteral("B-DRAFT"), productTypeId, 5,
-        sourceId, QDateTime::currentDateTime(), {}}); QVERIFY(created.ok());
+    const EntityId created = addConfirmedBatch(QStringLiteral("B-EDIT"), 5);
+    QVERIFY(created > 0);
     QVERIFY(master->setProductTypeEnabled(productTypeId, false).ok());
-    InboundDialog edit(*master, *inbound); QVERIFY(edit.initialize(created.value()).ok());
+    InboundDialog edit(*master, *inbound);
+    QVERIFY(edit.initialize(created).ok());
     auto *productTypes = edit.findChild<QComboBox *>(QStringLiteral("productTypeId"));
     QCOMPARE(productTypes->currentData().toLongLong(), productTypeId);
-    edit.setDraft({{}, productTypeId, 5, sourceId, QDateTime::currentDateTime(), {}});
+    auto value = edit.input();
+    value.quantity = 0;
+    edit.setInput(value);
     edit.show();
     QCoreApplication::processEvents();
     QVERIFY(!edit.save());
-    auto *batchNo = edit.findChild<QLineEdit *>(QStringLiteral("batchNo"));
-    QVERIFY(batchNo->hasFocus());
+    QVERIFY(edit.findChild<QLineEdit *>(QStringLiteral("quantity"))->hasFocus());
     QVERIFY(!edit.findChild<QLabel *>(QStringLiteral("errorLabel"))->text().isEmpty());
 }
 
@@ -182,19 +192,16 @@ void DocumentDialogsTest::newDialogsFilterDisabledLocations()
 {
     const auto disabledInventory = addLocation(QStringLiteral("停用仓"), true);
     QVERIFY(master->setLocationEnabled(disabledInventory, false).ok());
-
     InboundDialog inboundDialog(*master, *inbound);
     QVERIFY(inboundDialog.initialize().ok());
     auto *inboundLocations = inboundDialog.findChild<QComboBox *>(QStringLiteral("initialLocationId"));
     QVERIFY(inboundLocations);
     QCOMPARE(inboundLocations->findData(disabledInventory), -1);
-
     LogisticsDialog logisticsDialog(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(logisticsDialog.initialize().ok());
     auto *sources = logisticsDialog.findChild<QComboBox *>(QStringLiteral("sourceLocationId"));
     auto *destinations = logisticsDialog.findChild<QComboBox *>(QStringLiteral("destinationLocationId"));
-    QVERIFY(sources);
-    QVERIFY(destinations);
+    QVERIFY(sources && destinations);
     QCOMPARE(sources->findData(disabledInventory), -1);
     QCOMPARE(destinations->findData(disabledInventory), -1);
     QVERIFY(logisticsDialog.addLine().ok());
@@ -209,7 +216,7 @@ void DocumentDialogsTest::logisticsFiltersBatchesAndDestinations()
     QVERIFY(transfer.setSourceLocation(sourceId).ok());
     QCOMPARE(transfer.visibleBatchIds(), QVector<EntityId>{batchId});
     QVERIFY(transfer.setSourceLocation(emptyLocation).ok());
-    QVERIFY(transfer.visibleBatchIds().isEmpty());
+    QCOMPARE(transfer.visibleBatchIds(), QVector<EntityId>{batchId});
     QVERIFY(transfer.setSourceLocation(sourceId).ok());
     QVERIFY(transfer.addLine().ok());
     QVERIFY(transfer.setLineBatch(0, batchId).ok());
@@ -222,7 +229,6 @@ void DocumentDialogsTest::logisticsFiltersBatchesAndDestinations()
     QCOMPARE(destination->findData(sourceId), -1);
     QVERIFY(destination->findData(destinationId) >= 0);
     QCOMPARE(destination->findData(externalId), -1);
-
     LogisticsDialog outbound(*master, *queries, *logistics, DocumentType::Outbound);
     QVERIFY(outbound.initialize().ok());
     auto *outboundDestination = outbound.findChild<QComboBox *>(QStringLiteral("destinationLocationId"));
@@ -230,48 +236,35 @@ void DocumentDialogsTest::logisticsFiltersBatchesAndDestinations()
     QCOMPARE(outboundDestination->findData(destinationId), -1);
 }
 
-void DocumentDialogsTest::transferSourceChangeDropsMatchingDestinationHistory()
+void DocumentDialogsTest::transferSourceChangeKeepsFactoryDestination()
 {
     const auto otherSource = addLocation(QStringLiteral("备用仓"), true);
     LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(dialog.initialize().ok());
     auto *destination = dialog.findChild<QComboBox *>(QStringLiteral("destinationLocationId"));
     QVERIFY(destination);
-    const int otherDestinationIndex = destination->findData(otherSource);
-    QVERIFY(otherDestinationIndex >= 0);
-    destination->setCurrentIndex(otherDestinationIndex);
-
-    auto *source = dialog.findChild<QComboBox *>(QStringLiteral("sourceLocationId"));
-    QVERIFY(source);
-    const int otherSourceIndex = source->findData(otherSource);
-    QVERIFY(otherSourceIndex >= 0);
-    source->setCurrentIndex(otherSourceIndex);
-
+    destination->setCurrentIndex(destination->findData(destinationId));
+    QVERIFY(dialog.setSourceLocation(otherSource).ok());
+    QCOMPARE(destination->currentData().toLongLong(), destinationId);
     QCOMPARE(destination->findData(otherSource), -1);
 }
 
-void DocumentDialogsTest::transferSourceChangeDropsUnavailableLineBatch()
+void DocumentDialogsTest::transferSourceChangePreservesLine()
 {
     const auto otherSource = addLocation(QStringLiteral("备用仓"), true);
+    const auto model = master->createProductModel(productTypeId, QStringLiteral("F25"), {});
+    QVERIFY(model.ok());
     LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(dialog.initialize().ok());
-    QVERIFY(dialog.setSourceLocation(sourceId).ok());
-    QVERIFY(dialog.addLine().ok());
-    QVERIFY(dialog.setLineBatch(0, batchId).ok());
-
-    auto *table = dialog.findChild<QTableWidget *>(QStringLiteral("lines"));
-    auto *batch = qobject_cast<QComboBox *>(table->cellWidget(0, 0));
-    QVERIFY(batch);
-    QCOMPARE(batch->findData(batchId), 0);
-
+    QVERIFY(dialog.setInput({QStringLiteral("T-SOURCE"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 17, model.value().id}}}).ok());
     auto *source = dialog.findChild<QComboBox *>(QStringLiteral("sourceLocationId"));
-    QVERIFY(source);
-    const int otherSourceIndex = source->findData(otherSource);
-    QVERIFY(otherSourceIndex >= 0);
-    source->setCurrentIndex(otherSourceIndex);
-
-    QCOMPARE(batch->findData(batchId), -1);
-    QCOMPARE(batch->count(), 0);
+    source->setCurrentIndex(source->findData(otherSource));
+    const auto value = dialog.input();
+    QCOMPARE(value.lines.size(), 1);
+    QCOMPARE(value.lines.front().batchId, batchId);
+    QCOMPARE(value.lines.front().productModelId, model.value().id);
+    QCOMPARE(value.lines.front().quantity, qint64(17));
 }
 
 void DocumentDialogsTest::newLineLoadsDefaultBatch()
@@ -298,7 +291,7 @@ void DocumentDialogsTest::logisticsDialogPreselectsPreferredBatch()
     QCOMPARE(batch->currentData().toLongLong(), second);
 }
 
-void DocumentDialogsTest::sourceQueryFailureClearsStaleLineChoices()
+void DocumentDialogsTest::sourceQueryFailurePreservesLineChoices()
 {
     LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(dialog.initialize().ok());
@@ -308,7 +301,7 @@ void DocumentDialogsTest::sourceQueryFailureClearsStaleLineChoices()
     const auto result = dialog.setSourceLocation(sourceId);
     QVERIFY(!result.ok());
     auto *table = dialog.findChild<QTableWidget *>(QStringLiteral("lines"));
-    QCOMPARE(qobject_cast<QComboBox *>(table->cellWidget(0, 0))->count(), 0);
+    QCOMPARE(qobject_cast<QComboBox *>(table->cellWidget(0, 0))->currentData().toLongLong(), batchId);
 }
 
 void DocumentDialogsTest::deletingEarlierLineKeepsCascadeBoundToCurrentRow()
@@ -332,7 +325,6 @@ void DocumentDialogsTest::pageRequestSignalsEmitOnce()
     QTimer::singleShot(0, [] { if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) dialog->reject(); });
     QVERIFY(QMetaObject::invokeMethod(&inboundPage, "viewSelected"));
     QCOMPARE(inboundEdit.count(), 0);
-
     LogisticsPage logisticsPage(*master, *queries, *logistics, DocumentType::Transfer);
     QSignalSpy createSpy(&logisticsPage, &LogisticsPage::createRequested);
     QTimer::singleShot(0, [] { if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) dialog->reject(); });
@@ -340,50 +332,54 @@ void DocumentDialogsTest::pageRequestSignalsEmitOnce()
     QCOMPARE(createSpy.count(), 1);
 }
 
-void DocumentDialogsTest::logisticsCreatesAndUpdatesDraft()
+void DocumentDialogsTest::logisticsCreatesAndUpdatesRecord()
 {
-    LogisticsDraft value{QStringLiteral("T-CREATE"), DocumentType::Transfer, sourceId,
-        destinationId, QDateTime::currentDateTime(), QStringLiteral("create"),
-        {{batchId, 9}}};
+    LogisticsInput value{QStringLiteral("T-CREATE"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), QStringLiteral("create"), {{batchId, 9}}};
     LogisticsDialog create(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(create.initialize().ok());
-    QVERIFY(create.setDraft(value).ok());
+    QVERIFY(create.setInput(value).ok());
     QVERIFY(create.save());
     const auto listed = logistics->list(DocumentType::Transfer);
-    QVERIFY(listed.ok()); QCOMPARE(listed.value().size(), 1);
-    QCOMPARE(listed.value().first().documentNo, QStringLiteral("T-CREATE"));
-
+    QVERIFY(listed.ok());
+    QCOMPARE(listed.value().size(), 1);
+    QCOMPARE(listed.value().first().status, DocumentStatus::Confirmed);
     LogisticsDialog update(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(update.initialize(listed.value().first().id).ok());
     value.documentNo = QStringLiteral("T-UPDATED");
     value.lines.first().quantity = 11;
-    QVERIFY(update.setDraft(value).ok());
+    QVERIFY(update.setInput(value).ok());
     QVERIFY(update.save());
     const auto loaded = logistics->byId(listed.value().first().id);
-    QVERIFY(loaded.ok()); QCOMPARE(loaded.value().documentNo, QStringLiteral("T-UPDATED"));
-    QCOMPARE(loaded.value().lines.first().quantity, 11);
+    QVERIFY(loaded.ok());
+    QCOMPARE(loaded.value().documentNo, QStringLiteral("T-UPDATED"));
+    QCOMPARE(loaded.value().lines.first().quantity, qint64(11));
+    QCOMPARE(queries->balance(batchId, destinationId).value(), qint64(11));
 }
 
-void DocumentDialogsTest::logisticsRejectsEditingNonDrafts()
+void DocumentDialogsTest::logisticsEditsConfirmedAndCancelledRecords()
 {
-    LogisticsDraft value{QStringLiteral("T-STATE"), DocumentType::Transfer, sourceId,
+    LogisticsInput value{QStringLiteral("T-STATE"), DocumentType::Transfer, sourceId,
         destinationId, QDateTime::currentDateTime(), {}, {{batchId, 2}}};
-    const auto confirmed = logistics->createDraft(value); QVERIFY(confirmed.ok());
-    QVERIFY(logistics->confirm(confirmed.value()).ok());
+    const auto confirmed = logistics->create(value);
+    QVERIFY(confirmed.ok());
     LogisticsDialog confirmedEdit(*master, *queries, *logistics, DocumentType::Transfer);
-    const auto confirmedResult = confirmedEdit.initialize(confirmed.value());
-    QVERIFY(!confirmedResult.ok()); QCOMPARE(confirmedResult.error().code, QStringLiteral("invalid_status"));
+    QVERIFY(confirmedEdit.initialize(confirmed.value()).ok());
+    QCOMPARE(confirmedEdit.findChild<QPushButton *>(QStringLiteral("saveButton"))->text(), QStringLiteral("保存修改"));
     QVERIFY(logistics->cancel(confirmed.value()).ok());
     LogisticsDialog cancelledEdit(*master, *queries, *logistics, DocumentType::Transfer);
-    const auto cancelledResult = cancelledEdit.initialize(confirmed.value());
-    QVERIFY(!cancelledResult.ok()); QCOMPARE(cancelledResult.error().code, QStringLiteral("invalid_status"));
+    QVERIFY(cancelledEdit.initialize(confirmed.value()).ok());
+    QCOMPARE(cancelledEdit.findChild<QPushButton *>(QStringLiteral("saveButton"))->text(), QStringLiteral("保存并恢复生效"));
+    QVERIFY(cancelledEdit.save());
+    QCOMPARE(logistics->byId(confirmed.value()).value().status, DocumentStatus::Confirmed);
 }
 
 void DocumentDialogsTest::logisticsLoadsDisabledHistoricalLocations()
 {
-    LogisticsDraft value{QStringLiteral("T-HISTORY-LOCATION"), DocumentType::Transfer, sourceId,
+    LogisticsInput value{QStringLiteral("T-HISTORY-LOCATION"), DocumentType::Transfer, sourceId,
         destinationId, QDateTime::currentDateTime(), {}, {{batchId, 2}}};
-    const auto created = logistics->createDraft(value); QVERIFY(created.ok());
+    const auto created = logistics->create(value);
+    QVERIFY(created.ok());
     QVERIFY(master->setLocationEnabled(sourceId, false).ok());
     QVERIFY(master->setLocationEnabled(destinationId, false).ok());
     LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Transfer);
@@ -398,10 +394,11 @@ void DocumentDialogsTest::logisticsLoadsDisabledHistoricalLocations()
 
 void DocumentDialogsTest::logisticsLoadsZeroBalanceHistoricalLineReadOnly()
 {
-    LogisticsDraft value{QStringLiteral("O-HISTORY-BATCH"), DocumentType::Outbound, sourceId,
-        externalId, QDateTime::currentDateTime(), {}, {{batchId, 5000000000LL}}};
-    const auto created = logistics->createDraft(value); QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
+    QVERIFY(logistics->create({QStringLiteral("T-HISTORY-BATCH"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 5000000000LL}}}).ok());
+    const auto created = logistics->create({QStringLiteral("O-HISTORY-BATCH"), DocumentType::Outbound,
+        destinationId, externalId, QDateTime::currentDateTime(), {}, {{batchId, 5000000000LL}}, personId});
+    QVERIFY(created.ok());
     LogisticsDialog view(*master, *queries, *logistics, DocumentType::Outbound);
     QVERIFY(view.initialize(created.value(), true).ok());
     auto *table = view.findChild<QTableWidget *>(QStringLiteral("lines"));
@@ -409,7 +406,8 @@ void DocumentDialogsTest::logisticsLoadsZeroBalanceHistoricalLineReadOnly()
     auto *quantity = qobject_cast<QLineEdit *>(table->cellWidget(0, 1));
     QCOMPARE(batch->currentData().toLongLong(), batchId);
     QCOMPARE(quantity->text(), QStringLiteral("5000000000"));
-    QVERIFY(!batch->isEnabled()); QVERIFY(!quantity->isEnabled());
+    QVERIFY(!batch->isEnabled());
+    QVERIFY(quantity->isReadOnly());
 }
 
 void DocumentDialogsTest::logisticsFocusesExactLineField()
@@ -418,16 +416,13 @@ void DocumentDialogsTest::logisticsFocusesExactLineField()
     QVERIFY(dialog.initialize().ok());
     const EntityId secondBatch = addConfirmedBatch(QStringLiteral("B-2"), 100);
     QVERIFY(secondBatch);
-    LogisticsDraft value{QStringLiteral("T-INVALID"), DocumentType::Transfer, sourceId,
-        destinationId, QDateTime::currentDateTime(), {},
-        {{batchId, 1}, {secondBatch, 0}}};
-    QVERIFY(dialog.setDraft(value).ok());
+    QVERIFY(dialog.setInput({QStringLiteral("T-INVALID"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 1}, {secondBatch, 0}}}).ok());
     dialog.show();
     QCoreApplication::processEvents();
     QVERIFY(!dialog.save());
     auto *table = dialog.findChild<QTableWidget *>(QStringLiteral("lines"));
-    auto *quantity = qobject_cast<QLineEdit *>(table->cellWidget(1, 1));
-    QVERIFY(quantity->hasFocus());
+    QVERIFY(qobject_cast<QLineEdit *>(table->cellWidget(1, 1))->hasFocus());
     QVERIFY(!dialog.findChild<QLabel *>(QStringLiteral("errorLabel"))->text().isEmpty());
 }
 
@@ -458,16 +453,15 @@ void DocumentDialogsTest::logisticsPreservesMultipleLinesAndReadOnlyState()
 {
     const EntityId secondBatch = addConfirmedBatch(QStringLiteral("B-2"), 100);
     QVERIFY(secondBatch);
-    LogisticsDraft value{QStringLiteral("T-1"), DocumentType::Transfer, sourceId,
-        destinationId, QDateTime::currentDateTime(), {},
-        {{batchId, 3000000000LL}, {secondBatch, 7}}};
+    LogisticsInput value{QStringLiteral("T-1"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 3000000000LL}, {secondBatch, 7}}};
     LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(dialog.initialize().ok());
-    QVERIFY(dialog.setDraft(value).ok());
-    QCOMPARE(dialog.draft().lines.size(), 2);
-    QCOMPARE(dialog.draft().lines.at(0).quantity, 3000000000LL);
-    const auto created = logistics->createDraft(value); QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
+    QVERIFY(dialog.setInput(value).ok());
+    QCOMPARE(dialog.input().lines.size(), 2);
+    QCOMPARE(dialog.input().lines.at(0).quantity, 3000000000LL);
+    const auto created = logistics->create(value);
+    QVERIFY(created.ok());
     LogisticsDialog view(*master, *queries, *logistics, DocumentType::Transfer);
     QVERIFY(view.initialize(created.value(), true).ok());
     QVERIFY(view.isReadOnly());
@@ -477,20 +471,15 @@ void DocumentDialogsTest::logisticsPreservesMultipleLinesAndReadOnlyState()
     QVERIFY(!view.findChild<QPushButton *>(QStringLiteral("addLineButton"))->isEnabled());
 }
 
-void DocumentDialogsTest::shortageContainsBusinessDetailsAndExactField()
+void DocumentDialogsTest::shortageSavesNegativeBalance()
 {
-    LogisticsDraft value{QStringLiteral("O-TOO-MUCH"), DocumentType::Outbound, sourceId,
-        externalId, QDateTime::currentDateTime(), {},
-        {{batchId, 6000000000LL}}};
-    const auto created = logistics->createDraft(value); QVERIFY(created.ok());
-    const auto result = logistics->confirm(created.value());
-    QVERIFY(!result.ok());
-    QCOMPARE(result.error().code, QStringLiteral("insufficient_stock"));
-    QVERIFY(result.error().message.contains(QStringLiteral("B-1")));
-    QVERIFY(result.error().message.contains(QStringLiteral("公司仓")));
-    QVERIFY(result.error().message.contains(QStringLiteral("5000000000")));
-    QVERIFY(result.error().message.contains(QStringLiteral("6000000000")));
-    QCOMPARE(result.error().field, QStringLiteral("lines[0].quantity"));
+    LogisticsDialog dialog(*master, *queries, *logistics, DocumentType::Outbound);
+    QVERIFY(dialog.initialize().ok());
+    QVERIFY(dialog.setInput({QStringLiteral("O-TOO-MUCH"), DocumentType::Outbound, destinationId,
+        externalId, QDateTime::currentDateTime(), {}, {{batchId, 6000000000LL}}, personId}).ok());
+    QVERIFY(dialog.save());
+    QCOMPARE(queries->balance(batchId, destinationId).value(), qint64(-6000000000LL));
+    QCOMPARE(queries->negativeBalanceCount().value(), qint64(1));
 }
 
 void DocumentDialogsTest::inboundPageExposesDialogInitializeFailures_data()
@@ -504,36 +493,19 @@ void DocumentDialogsTest::inboundPageExposesDialogInitializeFailures_data()
 void DocumentDialogsTest::inboundPageExposesDialogInitializeFailures()
 {
     QFETCH(QString, action);
-    EntityId selected = 0;
-    if (action == QStringLiteral("edit")) {
-        const auto draft = inbound->createDraft({QStringLiteral("B-PAGE-EDIT"), productTypeId, 1,
-            sourceId, QDateTime::currentDateTime(), {}});
-        QVERIFY(draft.ok());
-        selected = draft.value();
-    } else if (action == QStringLiteral("view")) {
-        selected = batchId;
-    }
-
+    const EntityId selected = action == QStringLiteral("create") ? 0 : batchId;
     InboundPage page(*master, *inbound);
     auto *table = page.findChild<QTableWidget *>(QStringLiteral("documents"));
     auto *error = page.findChild<QLabel *>(QStringLiteral("errorLabel"));
-    QVERIFY(table);
-    QVERIFY(error);
+    QVERIFY(table && error);
     if (selected) {
-        for (int row = 0; row < table->rowCount(); ++row) {
-            if (table->item(row, 0)->text().toLongLong() == selected) {
-                table->selectRow(row);
-                break;
-            }
-        }
-        QCOMPARE(table->item(table->currentRow(), 0)->text().toLongLong(), selected);
+        QVERIFY(page.selectBatch(selected).ok());
+        QCOMPARE(table->item(table->currentRow(), 0)->data(Qt::UserRole + 1).toLongLong(), selected);
         QVERIFY(db->execute(QStringLiteral("ALTER TABLE inbound_batches RENAME TO unavailable_inbound_batches")));
         QVERIFY(QMetaObject::invokeMethod(&page, action == QStringLiteral("edit") ? "editSelected" : "viewSelected"));
     } else {
         QVERIFY(db->execute(QStringLiteral("ALTER TABLE product_categories RENAME TO unavailable_categories")));
-        auto *create = page.findChild<QPushButton *>(QStringLiteral("createButton"));
-        QVERIFY(create);
-        create->click();
+        page.findChild<QPushButton *>(QStringLiteral("createButton"))->click();
     }
     QVERIFY(!page.lastError().code.isEmpty());
     QVERIFY(!error->text().isEmpty());
@@ -553,35 +525,23 @@ void DocumentDialogsTest::logisticsPageExposesDialogInitializeFailures()
     QFETCH(QString, action);
     EntityId selected = 0;
     if (action != QStringLiteral("create")) {
-        const auto document = logistics->createDraft({QStringLiteral("T-PAGE-INIT"),
-            DocumentType::Transfer, sourceId, destinationId, QDateTime::currentDateTime(), {},
-            {{batchId, 1}}});
+        const auto document = logistics->create({QStringLiteral("T-PAGE-INIT"), DocumentType::Transfer,
+            sourceId, destinationId, QDateTime::currentDateTime(), {}, {{batchId, 1}}});
         QVERIFY(document.ok());
         selected = document.value();
-        if (action == QStringLiteral("view"))
-            QVERIFY(logistics->confirm(selected).ok());
     }
-
     LogisticsPage page(*master, *queries, *logistics, DocumentType::Transfer);
     auto *table = page.findChild<QTableWidget *>(QStringLiteral("documents"));
     auto *error = page.findChild<QLabel *>(QStringLiteral("errorLabel"));
-    QVERIFY(table);
-    QVERIFY(error);
+    QVERIFY(table && error);
     if (selected) {
-        for (int row = 0; row < table->rowCount(); ++row) {
-            if (table->item(row, 0)->text().toLongLong() == selected) {
-                table->selectRow(row);
-                break;
-            }
-        }
-        QCOMPARE(table->item(table->currentRow(), 0)->text().toLongLong(), selected);
+        table->selectRow(0);
+        QCOMPARE(table->item(table->currentRow(), 0)->data(Qt::UserRole + 1).toLongLong(), selected);
         QVERIFY(db->execute(QStringLiteral("ALTER TABLE logistics_documents RENAME TO unavailable_logistics_documents")));
         QVERIFY(QMetaObject::invokeMethod(&page, action == QStringLiteral("edit") ? "editSelected" : "viewSelected"));
     } else {
         QVERIFY(db->execute(QStringLiteral("ALTER TABLE locations RENAME TO unavailable_locations")));
-        auto *create = page.findChild<QPushButton *>(QStringLiteral("createButton"));
-        QVERIFY(create);
-        create->click();
+        page.findChild<QPushButton *>(QStringLiteral("createButton"))->click();
     }
     QVERIFY(!page.lastError().code.isEmpty());
     QVERIFY(!error->text().isEmpty());
@@ -590,62 +550,53 @@ void DocumentDialogsTest::logisticsPageExposesDialogInitializeFailures()
 
 void DocumentDialogsTest::pagesExposeFailuresAndClearErrorsOnSuccess()
 {
-    const auto consumed = logistics->createDraft({QStringLiteral("O-CONSUME"), DocumentType::Outbound,
-        sourceId, externalId, QDateTime::currentDateTime(), {}, {{batchId, 1}}});
+    const auto consumed = logistics->create({QStringLiteral("O-CONSUME"), DocumentType::Outbound,
+        destinationId, externalId, QDateTime::currentDateTime(), {}, {{batchId, 1}}, personId});
     QVERIFY(consumed.ok());
-    QVERIFY(logistics->confirm(consumed.value()).ok());
-
     InboundPage inboundPage(*master, *inbound);
     QSignalSpy inboundChanged(&inboundPage, &InboundPage::dataChanged);
     auto *inboundError = inboundPage.findChild<QLabel *>(QStringLiteral("errorLabel"));
-    QVERIFY(inboundError); inboundPage.setConfirmationCallback([](const QString &) { return true; });
-    auto *inboundTable = inboundPage.findChild<QTableWidget *>(QStringLiteral("documents"));
-    inboundTable->selectRow(0);
+    inboundPage.setConfirmationCallback([](const QString &) { return true; });
+    inboundPage.findChild<QTableWidget *>(QStringLiteral("documents"))->selectRow(0);
+    QVERIFY(db->execute(QStringLiteral(
+        "CREATE TRIGGER abort_cancel BEFORE UPDATE OF status ON inbound_batches "
+        "BEGIN SELECT RAISE(ABORT,'forced cancellation failure'); END")));
     QVERIFY(QMetaObject::invokeMethod(&inboundPage, "cancelSelected"));
-    QCOMPARE(inboundPage.lastError().code, QStringLiteral("stock_dependency"));
+    QCOMPARE(inboundPage.lastError().code, QStringLiteral("database"));
     QCOMPARE(inboundError->text(), inboundPage.lastError().message);
     QCOMPARE(inboundChanged.count(), 0);
-
-    const auto inboundDraft = inbound->createDraft({QStringLiteral("B-PAGE-SUCCESS"), productTypeId, 1,
-        sourceId, QDateTime::currentDateTime(), {}}); QVERIFY(inboundDraft.ok());
-    QVERIFY(inboundPage.refresh().ok());
-    inboundChanged.clear();
-    inboundTable->selectRow(0);
-    QVERIFY(QMetaObject::invokeMethod(&inboundPage, "confirmSelected"));
-    QVERIFY(inboundPage.lastError().code.isEmpty());
+    QVERIFY(db->execute(QStringLiteral("DROP TRIGGER abort_cancel")));
+    QVERIFY(QMetaObject::invokeMethod(&inboundPage, "cancelSelected"));
     QVERIFY(inboundError->text().isEmpty());
     QCOMPARE(inboundChanged.count(), 1);
 
-    LogisticsDraft tooMuch{QStringLiteral("O-PAGE-FAIL"), DocumentType::Outbound, sourceId,
-        externalId, QDateTime::currentDateTime(), {}, {{batchId, 6000000000LL}}};
-    const auto created = logistics->createDraft(tooMuch); QVERIFY(created.ok());
     LogisticsPage logisticsPage(*master, *queries, *logistics, DocumentType::Outbound);
     QSignalSpy logisticsChanged(&logisticsPage, &LogisticsPage::dataChanged);
     auto *logisticsError = logisticsPage.findChild<QLabel *>(QStringLiteral("errorLabel"));
-    QVERIFY(logisticsError); logisticsPage.setConfirmationCallback([](const QString &) { return true; });
-    auto *logisticsTable = logisticsPage.findChild<QTableWidget *>(QStringLiteral("documents"));
-    logisticsTable->selectRow(0);
-    QVERIFY(QMetaObject::invokeMethod(&logisticsPage, "confirmSelected"));
-    QCOMPARE(logisticsPage.lastError().code, QStringLiteral("insufficient_stock"));
+    logisticsPage.setConfirmationCallback([](const QString &) { return true; });
+    logisticsPage.findChild<QTableWidget *>(QStringLiteral("documents"))->selectRow(0);
+    QVERIFY(db->execute(QStringLiteral(
+        "CREATE TRIGGER abort_logistics_cancel BEFORE UPDATE OF status ON logistics_documents "
+        "BEGIN SELECT RAISE(ABORT,'forced cancellation failure'); END")));
+    QVERIFY(QMetaObject::invokeMethod(&logisticsPage, "cancelSelected"));
+    QCOMPARE(logisticsPage.lastError().code, QStringLiteral("database"));
     QCOMPARE(logisticsError->text(), logisticsPage.lastError().message);
-    QVERIFY(logisticsError->text().contains(QStringLiteral("可用")));
-    QVERIFY(logisticsError->text().contains(QStringLiteral("请求")));
     QCOMPARE(logisticsChanged.count(), 0);
 }
 
-void DocumentDialogsTest::logisticsPageConfirmationAndDataChanged()
+void DocumentDialogsTest::logisticsPageCancellationAndDataChanged()
 {
-    LogisticsDraft value{QStringLiteral("T-PAGE"), DocumentType::Transfer, sourceId,
-        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 1}}};
-    const auto created = logistics->createDraft(value); QVERIFY(created.ok());
+    const auto created = logistics->create({QStringLiteral("T-PAGE"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 1}}});
+    QVERIFY(created.ok());
     LogisticsPage page(*master, *queries, *logistics, DocumentType::Transfer);
     QSignalSpy changed(&page, &LogisticsPage::dataChanged);
     int callbacks = 0;
     page.setConfirmationCallback([&callbacks](const QString &) { ++callbacks; return true; });
-    auto *table = page.findChild<QTableWidget *>(QStringLiteral("documents"));
-    table->selectRow(0);
-    QVERIFY(QMetaObject::invokeMethod(&page, "confirmSelected"));
-    QCOMPARE(callbacks, 1); QCOMPARE(changed.count(), 1);
+    page.findChild<QTableWidget *>(QStringLiteral("documents"))->selectRow(0);
+    QVERIFY(QMetaObject::invokeMethod(&page, "cancelSelected"));
+    QCOMPARE(callbacks, 1);
+    QCOMPARE(changed.count(), 1);
     QVERIFY(page.lastError().code.isEmpty());
 }
 
@@ -654,8 +605,7 @@ void DocumentDialogsTest::pageConfirmationAndDataChanged()
     InboundPage page(*master, *inbound);
     QSignalSpy changed(&page, &InboundPage::dataChanged);
     page.setConfirmationCallback([](const QString &) { return false; });
-    auto *table = page.findChild<QTableWidget *>(QStringLiteral("documents"));
-    table->selectRow(0);
+    page.findChild<QTableWidget *>(QStringLiteral("documents"))->selectRow(0);
     QVERIFY(QMetaObject::invokeMethod(&page, "cancelSelected"));
     QCOMPARE(changed.count(), 0);
     page.setConfirmationCallback([](const QString &) { return true; });
@@ -671,14 +621,14 @@ void DocumentDialogsTest::outboundModelCascadeAndZeroStockReturn()
     QVERIFY(f25.ok() && p25.ok() && otherType.ok());
     const auto otherModel = master->createProductModel(otherType.value().id, QStringLiteral("MQTT"), {});
     QVERIFY(otherModel.ok());
-    const auto second = inbound->createDraft({QStringLiteral("B-OTHER"), otherType.value().id,
-        10, sourceId, QDateTime::currentDateTime(), {}});
+    const auto second = inbound->create({QStringLiteral("B-OTHER"), otherType.value().id,
+        10, sourceId, QDateTime::currentDateTime(), {}, QStringLiteral("V40"), personId});
     QVERIFY(second.ok());
-    QVERIFY(inbound->confirm(second.value()).ok());
-
+    QVERIFY(logistics->create({QStringLiteral("T-MODELS"), DocumentType::Transfer, sourceId,
+        destinationId, QDateTime::currentDateTime(), {}, {{batchId, 5000000000LL}}}).ok());
     LogisticsDialog outbound(*master, *queries, *logistics, DocumentType::Outbound);
     QVERIFY(outbound.initialize().ok());
-    QVERIFY(outbound.setSourceLocation(sourceId).ok());
+    QVERIFY(outbound.setSourceLocation(destinationId).ok());
     QVERIFY(outbound.addLine().ok());
     QVERIFY(outbound.addLine().ok());
     auto *lines = outbound.findChild<QTableWidget *>(QStringLiteral("lines"));
@@ -692,47 +642,41 @@ void DocumentDialogsTest::outboundModelCascadeAndZeroStockReturn()
     QCOMPARE(models->findData(f25.value().id), -1);
     QVERIFY(models->findData(otherModel.value().id) >= 0);
 
-    LogisticsDraft draft{QStringLiteral("O-MODELS"), DocumentType::Outbound, sourceId, externalId,
+    LogisticsInput value{QStringLiteral("O-MODELS"), DocumentType::Outbound, destinationId, externalId,
         QDateTime::currentDateTime(), {}, {{batchId, 3000000000LL, f25.value().id},
-                                         {batchId, 2000000000LL, p25.value().id}}};
-    QVERIFY(outbound.setDraft(draft).ok());
-    QCOMPARE(outbound.draft().lines.front().productModelId, f25.value().id);
+                                         {batchId, 2000000000LL, p25.value().id}}, personId};
+    QVERIFY(outbound.setInput(value).ok());
+    QCOMPARE(outbound.input().lines.front().productModelId, f25.value().id);
     QVERIFY(outbound.save());
     const auto sent = logistics->list(DocumentType::Outbound);
     QVERIFY(sent.ok());
     QCOMPARE(sent.value().size(), 1);
-    QVERIFY(logistics->confirm(sent.value().front().id).ok());
     QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
-    QVERIFY(master->setProductModelEnabled(f25.value().id, false).ok());
 
     LogisticsDialog returned(*master, *queries, *logistics, DocumentType::Return);
     QVERIFY(returned.initialize().ok());
-    QVERIFY(returned.setSourceLocation(externalId).ok());
-    QCOMPARE(returned.visibleBatchIds(), QVector<EntityId>{batchId});
+    QVERIFY(returned.setSourceLocation(destinationId).ok());
+    QVERIFY(returned.visibleBatchIds().contains(batchId));
     auto *destinations = returned.findChild<QComboBox *>(QStringLiteral("destinationLocationId"));
     QVERIFY(destinations->findData(sourceId) >= 0);
     QCOMPARE(destinations->findData(externalId), -1);
-    QVERIFY(returned.setDraft({QStringLiteral("R-MODELS"), DocumentType::Return, externalId, sourceId,
+    QVERIFY(returned.setInput({QStringLiteral("R-MODELS"), DocumentType::Return, destinationId, sourceId,
         QDateTime::currentDateTime(), {}, {{batchId, 50, f25.value().id}}}).ok());
     QVERIFY(returned.save());
     const auto saved = logistics->list(DocumentType::Return);
     QVERIFY(saved.ok());
     QCOMPARE(saved.value().size(), 1);
-    QVERIFY(logistics->confirm(saved.value().front().id).ok());
-    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(50));
+    QCOMPARE(queries->batchRemaining(batchId).value(), qint64(0));
     LogisticsDialog view(*master, *queries, *logistics, DocumentType::Return);
     QVERIFY(view.initialize(saved.value().front().id, true).ok());
     auto *viewLines = view.findChild<QTableWidget *>(QStringLiteral("lines"));
     auto *viewModel = qobject_cast<QComboBox *>(viewLines->cellWidget(0, 2));
-    QVERIFY(viewModel);
     QCOMPARE(viewModel->currentData().toLongLong(), f25.value().id);
     QVERIFY(!viewModel->isEnabled());
-    const auto historyDraft = logistics->createDraft({QStringLiteral("O-HISTORY-MODEL"),
-        DocumentType::Outbound, sourceId, externalId, QDateTime::currentDateTime(), {},
-        {{batchId, 1, f25.value().id}}});
-    QVERIFY(historyDraft.ok());
+
+    QVERIFY(master->setProductModelEnabled(f25.value().id, false).ok());
     LogisticsDialog edit(*master, *queries, *logistics, DocumentType::Outbound);
-    QVERIFY(edit.initialize(historyDraft.value()).ok());
+    QVERIFY(edit.initialize(sent.value().front().id).ok());
     auto *editLines = edit.findChild<QTableWidget *>(QStringLiteral("lines"));
     auto *editModel = qobject_cast<QComboBox *>(editLines->cellWidget(0, 2));
     QCOMPARE(editModel->currentData().toLongLong(), f25.value().id);

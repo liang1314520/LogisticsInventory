@@ -41,6 +41,7 @@ private:
     std::unique_ptr<BatchWorkflowService> workflow;
     EntityId productTypeId = 0;
     EntityId locationId = 0;
+    EntityId personId = 0;
 };
 
 void WorkflowBarTest::init()
@@ -64,15 +65,20 @@ void WorkflowBarTest::init()
                                                  LocationType::Company, true);
     QVERIFY(location.ok());
     locationId = location.value().id;
+    const auto person = master->createPersonnel(QStringLiteral("经办人"));
+    QVERIFY(person.ok());
+    personId = person.value().id;
+    QVERIFY(master->createLocation(QStringLiteral("工厂"), LocationType::Factory, true).ok());
+    QVERIFY(master->createLocation(QStringLiteral("Amazon"), LocationType::Other, false).ok());
     workflow = std::make_unique<BatchWorkflowService>(*master, *documents, *inventory,
                                                        *queries);
 }
 
 EntityId WorkflowBarTest::createConfirmedBatch(const QString &batchNo, qint64 quantity)
 {
-    const auto created = inbound->createDraft({batchNo, productTypeId, quantity, locationId,
-                                                QDateTime::currentDateTime(), {}});
-    if (!created.ok() || !inbound->confirm(created.value()).ok())
+    const auto created = inbound->create({batchNo, productTypeId, quantity, locationId,
+        QDateTime::currentDateTime(), {}, QStringLiteral("V40"), personId});
+    if (!created.ok())
         return 0;
     return created.value();
 }
@@ -113,7 +119,7 @@ void WorkflowBarTest::nextButtonUsesWorkflowTarget()
     QSignalSpy next(&bar, &WorkflowBar::nextRequested);
     QVERIFY(QMetaObject::invokeMethod(&bar, "requestNext"));
     QCOMPARE(next.count(), 1);
-    QCOMPARE(next.at(0).at(0).toInt(), 3);
+    QCOMPARE(next.at(0).at(0).toInt(), 2);
     QCOMPARE(next.at(0).at(1).toLongLong(), batch);
 }
 

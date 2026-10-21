@@ -15,25 +15,25 @@ class LogisticsServiceTest : public QObject {
     Q_OBJECT
 private slots:
     void init();
-    void aggregateOverIssueRollsBack();
-    void draftUpdateDoesNotPostInventory();
+    void duplicateBatchModelRollsBack();
+    void updateReplacesInventory();
     void loadedDocumentLinesAreValidatedAndProcessed();
     void transferPostsBothSidesAndSnapshots();
     void confirmedHistoryKeepsNameAndCodeSnapshots();
     void outboundPostsSourceOnly();
     void validatesLocationsAndMaterialUsage();
-    void cancelReversesAndRejectsStockDependency();
+    void cancelReversesAndAllowsNegativeStock();
     void duplicateTransitionsDoNotPostAgain();
-    void repeatedCopiesProduceCleanDraftsWithoutEntries();
-    void repositoryWritesEmptyDocumentNumberAsSqlNullOnUpdate();
+    void repeatedRestoresKeepOneRecordAndReplaceEntries();
+    void updateKeepsOriginalNumberWhenInputIsEmpty();
     void statusFailureRollsBackRealTransaction();
     void snapshotFailureRollsBackEntriesAndStatus();
     void quantityFailureIsPropagated();
     void cancelQuantityFailureIsPropagated();
-    void listIsNewestFirstAndDeleteOnlyAllowsDraft();
+    void listIsNewestFirstAndRetainsCancelledRecords();
 private:
     EntityId location(const QString &name, bool inventory, LocationType type = LocationType::Company);
-    LogisticsDraft draft(DocumentType type, EntityId destination, qint64 quantity = 40) const;
+    LogisticsInput input(DocumentType type, EntityId destination, qint64 quantity = 40) const;
 
     std::unique_ptr<TestDatabase> db;
     std::unique_ptr<MasterDataRepository> masterRepository;
@@ -47,6 +47,7 @@ private:
     EntityId sourceId = 0;
     EntityId destinationId = 0;
     EntityId externalId = 0;
+    EntityId personId = 0;
 };
 
 void LogisticsServiceTest::init()
@@ -57,25 +58,24 @@ void LogisticsServiceTest::init()
     masterService = std::make_unique<MasterDataService>(*masterRepository);
     documents = std::make_unique<DocumentRepository>(db->database());
     inventory = std::make_unique<InventoryRepository>(db->database());
-    inbound = std::make_unique<InboundService>(db->database(), *masterRepository,
-                                               *documents, *inventory);
-    logistics = std::make_unique<LogisticsService>(db->database(), *masterRepository,
-                                                   *documents, *inventory);
+    inbound = std::make_unique<InboundService>(db->database(), *masterRepository, *documents, *inventory);
+    logistics = std::make_unique<LogisticsService>(db->database(), *masterRepository, *documents, *inventory);
     const auto category = masterService->createCategory(QStringLiteral("设备"));
     QVERIFY(category.ok());
-    const auto productType = masterService->createProductType(category.value().id,
-                                                               QStringLiteral("GW-01"), QString());
-    QVERIFY(productType.ok());
-    productTypeId = productType.value().id;
+    const auto product = masterService->createProductType(category.value().id, QStringLiteral("GW-01"), {});
+    QVERIFY(product.ok());
+    productTypeId = product.value().id;
     sourceId = location(QStringLiteral("公司仓"), true);
-    destinationId = location(QStringLiteral("项目仓"), true, LocationType::ProjectSite);
-    externalId = location(QStringLiteral("客户"), false, LocationType::Customer);
-    const InboundDraft inboundDraft{QStringLiteral("B-001"), productTypeId, 100, sourceId,
-                                    QDateTime::fromString(QStringLiteral("2026-09-10T09:00:00"), Qt::ISODate), {}};
-    const auto inboundCreated = inbound->createDraft(inboundDraft);
-    QVERIFY(inboundCreated.ok());
-    batchId = inboundCreated.value();
-    QVERIFY(inbound->confirm(batchId).ok());
+    destinationId = location(QStringLiteral("工厂仓"), true, LocationType::Factory);
+    externalId = location(QStringLiteral("Amazon"), false, LocationType::Other);
+    const auto person = masterService->createPersonnel(QStringLiteral("经办人"));
+    QVERIFY(person.ok());
+    personId = person.value().id;
+    const auto created = inbound->create({QStringLiteral("B-001"), productTypeId, 100, sourceId,
+        QDateTime::fromString(QStringLiteral("2026-09-10T09:00:00"), Qt::ISODate), {},
+        QStringLiteral("V40"), personId});
+    QVERIFY(created.ok());
+    batchId = created.value();
 }
 
 EntityId LogisticsServiceTest::location(const QString &name, bool inventory, LocationType type)
@@ -84,59 +84,58 @@ EntityId LogisticsServiceTest::location(const QString &name, bool inventory, Loc
     return result.ok() ? result.value().id : 0;
 }
 
-LogisticsDraft LogisticsServiceTest::draft(DocumentType type, EntityId destination,
-                                            qint64 quantity) const
+LogisticsInput LogisticsServiceTest::input(DocumentType type, EntityId destination, qint64 quantity) const
 {
-    return {QStringLiteral("L-001"), type, sourceId, destination,
-            QDateTime::fromString(QStringLiteral("2026-09-10T10:00:00"), Qt::ISODate),
-            QStringLiteral("发运"), {{batchId, quantity}}};
+    return {QStringLiteral("L-001"), type, type == DocumentType::Transfer ? sourceId : destinationId,
+        destination, QDateTime::fromString(QStringLiteral("2026-09-10T10:00:00"), Qt::ISODate),
+        QStringLiteral("发运"), {{batchId, quantity}}, type == DocumentType::Outbound ? personId : 0};
 }
 
-void LogisticsServiceTest::aggregateOverIssueRollsBack()
+void LogisticsServiceTest::duplicateBatchModelRollsBack()
 {
-    auto value = draft(DocumentType::Outbound, externalId, 60);
+    auto value = input(DocumentType::Outbound, externalId, 60);
     value.lines.append({batchId, 50});
-    const auto rejected = logistics->createDraft(value);
+    const auto rejected = logistics->create(value);
     QVERIFY(!rejected.ok());
     QCOMPARE(rejected.error().code, QStringLiteral("duplicate_batch"));
     QCOMPARE(rejected.error().field, QStringLiteral("lines[1].batchId"));
     QCOMPARE(inventory->quantity(batchId, sourceId), qint64(100));
 }
 
-void LogisticsServiceTest::draftUpdateDoesNotPostInventory()
+void LogisticsServiceTest::updateReplacesInventory()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId, 40));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId, 40));
     QVERIFY(created.ok());
-    auto changed = draft(DocumentType::Outbound, externalId, 30);
+    auto changed = input(DocumentType::Transfer, destinationId, 30);
     changed.documentNo = QStringLiteral("L-UPDATED");
     changed.note = QStringLiteral("更新");
-    QVERIFY(logistics->updateDraft(created.value(), changed).ok());
+    QVERIFY(logistics->update(created.value(), changed).ok());
     const auto saved = documents->logisticsById(created.value());
     QVERIFY(saved.ok());
-    QCOMPARE(saved.value().type, DocumentType::Outbound);
-    QCOMPARE(saved.value().destinationLocationId, externalId);
+    QCOMPARE(saved.value().type, DocumentType::Transfer);
     QCOMPARE(saved.value().lines.front().quantity, qint64(30));
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).isEmpty());
+    QCOMPARE(saved.value().note, QStringLiteral("更新"));
+    QCOMPARE(inventory->quantity(batchId, sourceId), qint64(70));
+    QCOMPARE(inventory->quantity(batchId, destinationId), qint64(30));
+    QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
 }
 
 void LogisticsServiceTest::loadedDocumentLinesAreValidatedAndProcessed()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
     const auto loaded = documents->logisticsById(created.value());
     QVERIFY(loaded.ok());
     QCOMPARE(loaded.value().lines.size(), 1);
     QCOMPARE(loaded.value().lines.front().batchId, batchId);
-    QVERIFY(logistics->confirm(created.value()).ok());
     QCOMPARE(inventory->quantity(batchId, sourceId), qint64(60));
     QCOMPARE(inventory->quantity(batchId, destinationId), qint64(40));
 }
 
 void LogisticsServiceTest::transferPostsBothSidesAndSnapshots()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
     QCOMPARE(inventory->quantity(batchId, sourceId), qint64(60));
     QCOMPARE(inventory->quantity(batchId, destinationId), qint64(40));
     QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
@@ -144,7 +143,7 @@ void LogisticsServiceTest::transferPostsBothSidesAndSnapshots()
     QVERIFY(saved.ok());
     QCOMPARE(saved.value().status, DocumentStatus::Confirmed);
     QCOMPARE(saved.value().sourceNameSnapshot, QStringLiteral("公司仓"));
-    QCOMPARE(saved.value().destinationNameSnapshot, QStringLiteral("项目仓"));
+    QCOMPARE(saved.value().destinationNameSnapshot, QStringLiteral("工厂仓"));
     QCOMPARE(saved.value().lines.front().batchNoSnapshot, QStringLiteral("B-001"));
     QCOMPARE(saved.value().lines.front().productTypeId, productTypeId);
     QCOMPARE(saved.value().lines.front().categoryNameSnapshot, QStringLiteral("设备"));
@@ -153,10 +152,8 @@ void LogisticsServiceTest::transferPostsBothSidesAndSnapshots()
 
 void LogisticsServiceTest::confirmedHistoryKeepsNameAndCodeSnapshots()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
-
     QSqlQuery rename(db->database().connection());
     rename.prepare(QStringLiteral("UPDATE product_categories SET name='新设备' WHERE id="
                                   "(SELECT category_id FROM product_types WHERE id=?)"));
@@ -165,7 +162,6 @@ void LogisticsServiceTest::confirmedHistoryKeepsNameAndCodeSnapshots()
     rename.prepare(QStringLiteral("UPDATE product_types SET type_code='GW-NEW' WHERE id=?"));
     rename.addBindValue(productTypeId);
     QVERIFY(rename.exec());
-
     const auto saved = documents->logisticsById(created.value());
     QVERIFY(saved.ok());
     QCOMPARE(saved.value().lines.front().productTypeId, productTypeId);
@@ -175,155 +171,126 @@ void LogisticsServiceTest::confirmedHistoryKeepsNameAndCodeSnapshots()
 
 void LogisticsServiceTest::outboundPostsSourceOnly()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Outbound, externalId));
+    const auto created = logistics->create(input(DocumentType::Outbound, externalId));
     QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
-    QCOMPARE(inventory->quantity(batchId, sourceId), qint64(60));
+    QCOMPARE(inventory->quantity(batchId, sourceId), qint64(100));
+    QCOMPARE(inventory->quantity(batchId, destinationId), qint64(-40));
     QCOMPARE(inventory->quantity(batchId, externalId), qint64(0));
     QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 1);
 }
 
 void LogisticsServiceTest::validatesLocationsAndMaterialUsage()
 {
-    auto empty = draft(DocumentType::Transfer, destinationId);
+    auto empty = input(DocumentType::Transfer, destinationId);
     empty.lines.clear();
-    QCOMPARE(logistics->createDraft(empty).error().code, QStringLiteral("required"));
-    auto invalidQuantity = draft(DocumentType::Transfer, destinationId, 0);
-    const auto invalidQuantityResult = logistics->createDraft(invalidQuantity);
-    QCOMPARE(invalidQuantityResult.error().code, QStringLiteral("invalid"));
-    QCOMPARE(invalidQuantityResult.error().field, QStringLiteral("lines[0].quantity"));
-    auto invalidBatch = draft(DocumentType::Transfer, destinationId);
+    QCOMPARE(logistics->create(empty).error().field, QStringLiteral("lines"));
+    const auto invalidQuantity = logistics->create(input(DocumentType::Transfer, destinationId, 0));
+    QVERIFY(!invalidQuantity.ok());
+    QCOMPARE(invalidQuantity.error().field, QStringLiteral("lines[0].quantity"));
+    auto invalidBatch = input(DocumentType::Transfer, destinationId);
     invalidBatch.lines.front().batchId = 0;
-    QCOMPARE(logistics->createDraft(invalidBatch).error().field, QStringLiteral("lines[0].batchId"));
-    auto sameLocation = draft(DocumentType::Transfer, sourceId);
-    QCOMPARE(logistics->createDraft(sameLocation).error().code, QStringLiteral("invalid"));
-    auto transferExternal = draft(DocumentType::Transfer, externalId);
-    const auto transferId = logistics->createDraft(transferExternal);
-    QVERIFY(transferId.ok());
-    QCOMPARE(logistics->confirm(transferId.value()).error().code,
-             QStringLiteral("invalid_master_data"));
-    auto outboundInventory = draft(DocumentType::Outbound, destinationId);
-    outboundInventory.documentNo = QStringLiteral("L-002");
-    const auto outboundId = logistics->createDraft(outboundInventory);
-    QVERIFY(outboundId.ok());
-    QCOMPARE(logistics->confirm(outboundId.value()).error().code,
-             QStringLiteral("invalid_master_data"));
+    QCOMPARE(logistics->create(invalidBatch).error().field, QStringLiteral("lines[0].batchId"));
+    QCOMPARE(logistics->create(input(DocumentType::Transfer, sourceId)).error().code, QStringLiteral("invalid"));
+    QCOMPARE(logistics->create(input(DocumentType::Transfer, externalId)).error().field,
+             QStringLiteral("destinationLocationId"));
+    QCOMPARE(logistics->create(input(DocumentType::Outbound, sourceId)).error().field,
+             QStringLiteral("destinationLocationId"));
 }
 
-void LogisticsServiceTest::cancelReversesAndRejectsStockDependency()
+void LogisticsServiceTest::cancelReversesAndAllowsNegativeStock()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
     QVERIFY(logistics->cancel(created.value()).ok());
     QCOMPARE(inventory->quantity(batchId, sourceId), qint64(100));
     QCOMPARE(inventory->quantity(batchId, destinationId), qint64(0));
     QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 4);
-
-    auto second = draft(DocumentType::Transfer, destinationId);
+    auto second = input(DocumentType::Transfer, destinationId);
     second.documentNo = QStringLiteral("L-002");
-    const auto secondId = logistics->createDraft(second);
+    const auto secondId = logistics->create(second);
     QVERIFY(secondId.ok());
-    QVERIFY(logistics->confirm(secondId.value()).ok());
     QVERIFY(inventory->insertEntry(batchId, destinationId, QStringLiteral("Logistics"),
                                    9999, 0, -1, second.businessAt).ok());
-    const auto rejected = logistics->cancel(secondId.value());
-    QVERIFY(!rejected.ok());
-    QCOMPARE(rejected.error().code, QStringLiteral("stock_dependency"));
-    QCOMPARE(documents->logisticsById(secondId.value()).value().status,
-             DocumentStatus::Confirmed);
+    QVERIFY(logistics->cancel(secondId.value()).ok());
+    QCOMPARE(inventory->quantity(batchId, destinationId), qint64(-1));
+    QCOMPARE(documents->logisticsById(secondId.value()).value().status, DocumentStatus::Cancelled);
 }
 
 void LogisticsServiceTest::duplicateTransitionsDoNotPostAgain()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Outbound, externalId));
+    const auto created = logistics->create(input(DocumentType::Outbound, externalId));
     QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
-    QCOMPARE(logistics->confirm(created.value()).error().code, QStringLiteral("invalid_status"));
+    QVERIFY(logistics->update(created.value(), input(DocumentType::Outbound, externalId)).ok());
+    QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 1);
     QVERIFY(logistics->cancel(created.value()).ok());
-    QCOMPARE(logistics->cancel(created.value()).error().code, QStringLiteral("invalid_status"));
+    QVERIFY(logistics->cancel(created.value()).ok());
     QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
 }
 
-void LogisticsServiceTest::repeatedCopiesProduceCleanDraftsWithoutEntries()
+void LogisticsServiceTest::repeatedRestoresKeepOneRecordAndReplaceEntries()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    QCOMPARE(logistics->copyToDraft(created.value()).error().code,
-             QStringLiteral("invalid_status"));
-    QVERIFY(logistics->confirm(created.value()).ok());
-    QCOMPARE(logistics->copyToDraft(created.value()).error().code,
-             QStringLiteral("invalid_status"));
-    QVERIFY(logistics->cancel(created.value()).ok());
-    const auto firstCopy = logistics->copyToDraft(created.value());
-    const auto secondCopy = logistics->copyToDraft(created.value());
-    QVERIFY(firstCopy.ok());
-    QVERIFY(secondCopy.ok());
-    QVERIFY(firstCopy.value() != secondCopy.value());
-    for (const EntityId copiedId : {firstCopy.value(), secondCopy.value()}) {
-        const auto saved = documents->logisticsById(copiedId);
-        QVERIFY(saved.ok());
-        QCOMPARE(saved.value().documentNo, QString());
-        QCOMPARE(saved.value().status, DocumentStatus::Draft);
-        QVERIFY(!saved.value().confirmedAt.isValid());
-        QVERIFY(!saved.value().cancelledAt.isValid());
-        QCOMPARE(saved.value().lines.size(), 1);
-        QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), copiedId).isEmpty());
-        QCOMPARE(logistics->copyToDraft(copiedId).error().code,
-                 QStringLiteral("invalid_status"));
+    const auto original = documents->logisticsById(created.value()).value();
+    for (int i = 0; i < 2; ++i) {
+        QVERIFY(logistics->cancel(created.value()).ok());
+        QVERIFY(logistics->update(created.value(), input(DocumentType::Transfer, destinationId)).ok());
+        const auto saved = documents->logisticsById(created.value()).value();
+        QCOMPARE(saved.id, created.value());
+        QCOMPARE(saved.createdAt, original.createdAt);
+        QCOMPARE(saved.status, DocumentStatus::Confirmed);
+        QVERIFY(!saved.cancelledAt.isValid());
+        QCOMPARE(saved.lines.size(), 1);
+        QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
+        QCOMPARE(inventory->quantity(batchId, sourceId), qint64(60));
     }
+    QCOMPARE(logistics->list(DocumentType::Transfer).value().size(), 1);
 }
 
-void LogisticsServiceTest::repositoryWritesEmptyDocumentNumberAsSqlNullOnUpdate()
+void LogisticsServiceTest::updateKeepsOriginalNumberWhenInputIsEmpty()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    auto copiedDraft = draft(DocumentType::Transfer, destinationId);
-    copiedDraft.documentNo.clear();
-    QVERIFY(documents->updateLogisticsDraft(created.value(), copiedDraft).ok());
-    QSqlQuery query(db->database().connection());
-    query.prepare(QStringLiteral(
-        "SELECT document_no IS NULL FROM logistics_documents WHERE id=?"));
-    query.addBindValue(created.value());
-    QVERIFY(query.exec());
-    QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 1);
+    auto changed = input(DocumentType::Transfer, destinationId);
+    changed.documentNo.clear();
+    QVERIFY(logistics->update(created.value(), changed).ok());
+    QCOMPARE(documents->logisticsById(created.value()).value().documentNo, QStringLiteral("L-001"));
 }
 
 void LogisticsServiceTest::statusFailureRollsBackRealTransaction()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
     QVERIFY(db->execute(QStringLiteral(
-        "CREATE TRIGGER abort_logistics_confirm BEFORE UPDATE OF status ON logistics_documents "
+        "CREATE TRIGGER abort_logistics_update BEFORE UPDATE OF status ON logistics_documents "
         "WHEN NEW.id=%1 AND NEW.status='Confirmed' "
-        "BEGIN SELECT RAISE(ABORT, 'forced confirm failure'); END").arg(created.value())));
-    const auto rejected = logistics->confirm(created.value());
+        "BEGIN SELECT RAISE(ABORT, 'forced update failure'); END").arg(created.value())));
+    const auto rejected = logistics->update(created.value(), input(DocumentType::Transfer, destinationId, 50));
     QVERIFY(!rejected.ok());
     QCOMPARE(rejected.error().code, QStringLiteral("database"));
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).isEmpty());
-    QCOMPARE(documents->logisticsById(created.value()).value().status, DocumentStatus::Draft);
+    QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
+    QCOMPARE(inventory->quantity(batchId, sourceId), qint64(60));
+    QCOMPARE(documents->logisticsById(created.value()).value().lines.front().quantity, qint64(40));
 }
 
 void LogisticsServiceTest::snapshotFailureRollsBackEntriesAndStatus()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    const auto saved = documents->logisticsById(created.value());
-    QVERIFY(saved.ok());
+    const auto before = documents->logisticsById(created.value()).value();
     QVERIFY(db->execute(QStringLiteral(
-        "CREATE TRIGGER abort_line_snapshot BEFORE UPDATE OF batch_no_snapshot "
-        "ON logistics_document_lines WHEN NEW.id=%1 "
-        "BEGIN SELECT RAISE(ABORT, 'forced snapshot failure'); END")
-                            .arg(saved.value().lines.front().id)));
-    const auto rejected = logistics->confirm(created.value());
+        "CREATE TRIGGER abort_line_snapshot BEFORE INSERT ON logistics_document_lines "
+        "WHEN NEW.document_id=%1 BEGIN SELECT RAISE(ABORT, 'forced snapshot failure'); END")
+                            .arg(created.value())));
+    const auto rejected = logistics->update(created.value(), input(DocumentType::Transfer, destinationId, 50));
     QVERIFY(!rejected.ok());
     QCOMPARE(rejected.error().code, QStringLiteral("database"));
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).isEmpty());
+    QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
     const auto after = documents->logisticsById(created.value());
     QVERIFY(after.ok());
-    QCOMPARE(after.value().status, DocumentStatus::Draft);
-    QVERIFY(after.value().lines.front().batchNoSnapshot.isEmpty());
+    QCOMPARE(after.value().status, DocumentStatus::Confirmed);
+    QCOMPARE(after.value().lines.front().id, before.lines.front().id);
+    QCOMPARE(after.value().lines.front().batchNoSnapshot, QStringLiteral("B-001"));
 }
 
 void LogisticsServiceTest::quantityFailureIsPropagated()
@@ -339,21 +306,16 @@ void LogisticsServiceTest::quantityFailureIsPropagated()
     overflow.addBindValue(QStringLiteral("2026-09-10T10:00:00"));
     overflow.addBindValue(QStringLiteral("2026-09-10T10:00:00"));
     QVERIFY(overflow.exec());
-    auto value = draft(DocumentType::Outbound, externalId);
-    value.documentNo = QStringLiteral("L-OVERFLOW");
-    const auto created = logistics->createDraft(value);
-    QVERIFY(created.ok());
-    const auto rejected = logistics->confirm(created.value());
+    const auto rejected = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(!rejected.ok());
     QCOMPARE(rejected.error().code, QStringLiteral("database"));
-    QVERIFY(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).isEmpty());
+    QVERIFY(logistics->list(DocumentType::Transfer).value().isEmpty());
 }
 
 void LogisticsServiceTest::cancelQuantityFailureIsPropagated()
 {
-    const auto created = logistics->createDraft(draft(DocumentType::Transfer, destinationId));
+    const auto created = logistics->create(input(DocumentType::Transfer, destinationId));
     QVERIFY(created.ok());
-    QVERIFY(logistics->confirm(created.value()).ok());
     QSqlQuery overflow(db->database().connection());
     overflow.prepare(QStringLiteral(
         "INSERT INTO inventory_entries(batch_id,location_id,source_type,source_id,"
@@ -369,33 +331,27 @@ void LogisticsServiceTest::cancelQuantityFailureIsPropagated()
     QVERIFY(!rejected.ok());
     QCOMPARE(rejected.error().code, QStringLiteral("database"));
     QCOMPARE(inventory->entriesForSource(QStringLiteral("Logistics"), created.value()).size(), 2);
-    QCOMPARE(documents->logisticsById(created.value()).value().status,
-             DocumentStatus::Confirmed);
+    QCOMPARE(documents->logisticsById(created.value()).value().status, DocumentStatus::Confirmed);
 }
 
-void LogisticsServiceTest::listIsNewestFirstAndDeleteOnlyAllowsDraft()
+void LogisticsServiceTest::listIsNewestFirstAndRetainsCancelledRecords()
 {
-    auto older = draft(DocumentType::Transfer, destinationId);
+    auto older = input(DocumentType::Transfer, destinationId);
     older.documentNo = QStringLiteral("L-OLD");
     older.businessAt = QDateTime::fromString(QStringLiteral("2026-08-01T10:00:00"), Qt::ISODate);
-    auto newer = draft(DocumentType::Transfer, destinationId);
+    auto newer = input(DocumentType::Transfer, destinationId);
     newer.documentNo = QStringLiteral("L-NEW");
     newer.businessAt = QDateTime::fromString(QStringLiteral("2026-09-01T10:00:00"), Qt::ISODate);
-    const auto oldId = logistics->createDraft(older);
-    const auto newId = logistics->createDraft(newer);
-    QVERIFY(oldId.ok()); QVERIFY(newId.ok());
-    QVERIFY(logistics->confirm(newId.value()).ok());
+    const auto oldId = logistics->create(older);
+    const auto newId = logistics->create(newer);
+    QVERIFY(oldId.ok() && newId.ok());
     const auto listed = logistics->list(DocumentType::Transfer);
-    QVERIFY(listed.ok()); QCOMPARE(listed.value().size(), 2);
+    QVERIFY(listed.ok());
+    QCOMPARE(listed.value().size(), 2);
     QCOMPARE(listed.value().at(0).id, newId.value());
-    const auto confirmedDelete = logistics->deleteDraft(newId.value());
-    QVERIFY(!confirmedDelete.ok());
-    QCOMPARE(confirmedDelete.error().code, QStringLiteral("invalid_status"));
     QVERIFY(logistics->cancel(newId.value()).ok());
-    QCOMPARE(logistics->deleteDraft(newId.value()).error().code,
-             QStringLiteral("invalid_status"));
-    QVERIFY(logistics->deleteDraft(oldId.value()).ok());
-    QCOMPARE(logistics->list(DocumentType::Transfer).value().size(), 1);
+    QVERIFY(logistics->cancel(oldId.value()).ok());
+    QCOMPARE(logistics->list(DocumentType::Transfer).value().size(), 2);
 }
 
 QTEST_MAIN(LogisticsServiceTest)

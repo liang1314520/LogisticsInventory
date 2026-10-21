@@ -9,17 +9,15 @@ public:
     InboundService(Database &database, MasterDataRepository &masterData,
                    DocumentRepository &documents, InventoryRepository &inventory);
 
-    Result<EntityId> createDraft(const InboundDraft &draft);
-    Result<bool> updateDraft(EntityId id, const InboundDraft &draft);
+    Result<EntityId> create(const InboundInput &input);
+    Result<bool> update(EntityId id, const InboundInput &input);
     Result<InboundBatch> byId(EntityId id) const;
-    Result<bool> confirm(EntityId id);
     Result<bool> cancel(EntityId id);
     Result<QVector<InboundBatch>> list() const;
-    Result<bool> deleteDraft(EntityId id);
-    Result<EntityId> copyToDraft(EntityId id);
 
 private:
-    ServiceError validateDraft(const InboundDraft &draft, bool requireNumber = true) const;
+    Result<EntityId> save(EntityId id, const InboundInput &input);
+    Result<InboundBatch> prepare(const InboundInput &input, const InboundBatch *current) const;
 
     Database &database_;
     MasterDataRepository &masterData_;

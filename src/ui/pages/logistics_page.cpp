@@ -8,16 +8,36 @@
 #include "ui/widgets/status_presentation.h"
 #include "ui/widgets/layout_utils.h"
 
+#include <QComboBox>
+#include <QDateTime>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QTableWidget>
 #include <QVariant>
 #include <QVBoxLayout>
 
 #include <utility>
+
+namespace {
+class BusinessDateItem final : public QTableWidgetItem {
+public:
+    BusinessDateItem(const QString &text, const QDateTime &value)
+        : QTableWidgetItem(text)
+    {
+        setData(Qt::UserRole, value);
+    }
+
+    bool operator<(const QTableWidgetItem &other) const override
+    {
+        return data(Qt::UserRole).toDateTime() < other.data(Qt::UserRole).toDateTime();
+    }
+};
+}
 
 LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryService &queries,
                              LogisticsService &service, DocumentType type, QWidget *parent,
@@ -44,19 +64,50 @@ LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryServic
     auto *create = button(QStringLiteral("新建"), QStringLiteral("createButton"));
     edit_ = button(QStringLiteral("编辑"), QStringLiteral("editButton"));
     view_ = button(QStringLiteral("查看"), QStringLiteral("viewButton"));
-    remove_ = button(QStringLiteral("删除"), QStringLiteral("deleteButton"));
-    confirm_ = button(QStringLiteral("确认"), QStringLiteral("confirmButton"));
-    cancel_ = button(QStringLiteral("取消确认"), QStringLiteral("cancelButton"));
-    copy_ = button(QStringLiteral("复制为草稿"), QStringLiteral("copyButton"));
+    cancel_ = button(QStringLiteral("作废"), QStringLiteral("cancelButton"));
     QStringList headers{QStringLiteral("序号"), QStringLiteral("单号"),
         QStringLiteral("业务日期"), QStringLiteral("状态"), QStringLiteral("来源")};
-    if (type_ == DocumentType::Outbound)
+    if (type_ == DocumentType::Transfer)
+        headers.append(QStringLiteral("接收工厂"));
+    else if (type_ == DocumentType::Outbound)
         headers.append(QStringLiteral("出库确认人"));
-    layout->addLayout(actions); table_ = new QTableWidget(0, headers.size(), this);
+    layout->addLayout(actions);
+    if (type_ == DocumentType::Outbound) {
+        auto *filters = new QHBoxLayout;
+        sourceFilter_ = new QComboBox(this);
+        sourceFilter_->setObjectName(QStringLiteral("sourceFilter"));
+        sourceFilter_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        sourceFilter_->addItem(QStringLiteral("全部来源"), QVariant::fromValue(EntityId(0)));
+        filters->addWidget(new QLabel(QStringLiteral("来源"), this));
+        filters->addWidget(sourceFilter_);
+        filters->addStretch();
+        layout->addLayout(filters);
+        connect(sourceFilter_, &QComboBox::currentIndexChanged, this, &LogisticsPage::applySourceFilter);
+    }
+    table_ = new QTableWidget(0, headers.size(), this);
     table_->setObjectName(QStringLiteral("documents"));
     table_->setHorizontalHeaderLabels(headers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows); table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    if (type_ == DocumentType::Outbound) {
+        auto *header = table_->horizontalHeader();
+        header->setSectionsClickable(true);
+        header->setSortIndicatorShown(false);
+        connect(header, &QHeaderView::sectionClicked, this, [this, header](int column) {
+            if (column != 0 && column != 1 && column != 2 && column != 4) {
+                header->setSortIndicator(sortColumn_, sortOrder_);
+                header->setSortIndicatorShown(sortColumn_ >= 0);
+                return;
+            }
+            sortOrder_ = sortColumn_ == column && sortOrder_ == Qt::AscendingOrder
+                ? Qt::DescendingOrder : Qt::AscendingOrder;
+            sortColumn_ = column;
+            const QSignalBlocker blocker(table_);
+            table_->sortItems(sortColumn_, sortOrder_);
+            header->setSortIndicatorShown(true);
+            applySourceFilter();
+        });
+    }
     layout->addWidget(table_);
     error_ = new QLabel(this); error_->setObjectName(QStringLiteral("errorLabel"));
     error_->setStyleSheet(QStringLiteral("color:#b00020")); error_->setWordWrap(true); layout->addWidget(error_);
@@ -66,10 +117,7 @@ LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryServic
     });
     connect(edit_, &QPushButton::clicked, this, &LogisticsPage::editSelected);
     connect(view_, &QPushButton::clicked, this, &LogisticsPage::viewSelected);
-    connect(remove_, &QPushButton::clicked, this, &LogisticsPage::deleteSelected);
-    connect(confirm_, &QPushButton::clicked, this, &LogisticsPage::confirmSelected);
     connect(cancel_, &QPushButton::clicked, this, &LogisticsPage::cancelSelected);
-    connect(copy_, &QPushButton::clicked, this, &LogisticsPage::copySelected);
     connect(table_, &QTableWidget::itemSelectionChanged, this, [this] {
         updateActions();
         if (selectedId() <= 0)
@@ -90,6 +138,7 @@ Result<bool> LogisticsPage::refresh()
 {
     const auto result = service_.list(type_);
     if (!result.ok()) { setError(result.error()); return Result<bool>::failure(lastError_); }
+    const EntityId selectedDocumentId = type_ == DocumentType::Outbound ? selectedId() : 0;
     const QSignalBlocker blocker(table_);
     setError(); table_->clearContents();
     table_->setCurrentCell(-1, -1);
@@ -106,10 +155,24 @@ Result<bool> LogisticsPage::refresh()
         QStringList cells{QString::number(row + 1), document.documentNo,
             document.businessAt.toString(QStringLiteral("yyyy-MM-dd HH:mm")), StatusPresentation::documentText(document.status),
             document.sourceNameSnapshot};
-        if (type_ == DocumentType::Outbound)
+        if (type_ == DocumentType::Transfer)
+            cells.append(document.destinationNameSnapshot);
+        else if (type_ == DocumentType::Outbound)
             cells.append(document.outboundConfirmedByName.isEmpty()
                 ? QStringLiteral("未填写") : document.outboundConfirmedByName);
-        for (int column = 0; column < cells.size(); ++column) table_->setItem(row, column, new QTableWidgetItem(cells.at(column)));
+        for (int column = 0; column < cells.size(); ++column) {
+            QTableWidgetItem *item;
+            if (column == 0) {
+                item = new QTableWidgetItem;
+                item->setData(Qt::DisplayRole, row + 1);
+            } else if (type_ == DocumentType::Outbound && column == 2) {
+                item = new BusinessDateItem(cells.at(column), document.businessAt);
+            } else {
+                item = new QTableWidgetItem(cells.at(column));
+            }
+            table_->setItem(row, column, item);
+        }
+        table_->item(row, 4)->setData(Qt::UserRole, document.sourceLocationId);
         StatusPresentation::apply(table_->item(row, 3), StatusPresentation::tone(document.status));
         table_->item(row, 0)->setData(Qt::UserRole, QVariant::fromValue(document.status));
         table_->item(row, 0)->setData(Qt::UserRole + 1, document.id);
@@ -118,12 +181,57 @@ Result<bool> LogisticsPage::refresh()
             batchIds.append(QVariant::fromValue(line.batchId));
         table_->item(row, 0)->setData(Qt::UserRole + 2, batchIds);
     }
-    if (currentBatchId_ > 0)
+    if (sourceFilter_) {
+        const EntityId sourceId = sourceFilter_->currentData().toLongLong();
+        const QSignalBlocker filterBlocker(sourceFilter_);
+        sourceFilter_->clear();
+        sourceFilter_->addItem(QStringLiteral("全部来源"), QVariant::fromValue(EntityId(0)));
+        QSet<EntityId> sources;
+        for (const auto &document : result.value()) {
+            if (sources.contains(document.sourceLocationId))
+                continue;
+            sources.insert(document.sourceLocationId);
+            sourceFilter_->addItem(document.sourceNameSnapshot, QVariant::fromValue(document.sourceLocationId));
+        }
+        const int index = sourceFilter_->findData(QVariant::fromValue(sourceId));
+        sourceFilter_->setCurrentIndex(index >= 0 ? index : 0);
+    }
+    if (sortColumn_ >= 0)
+        table_->sortItems(sortColumn_, sortOrder_);
+    applySourceFilter();
+    bool selectionRestored = false;
+    if (selectedDocumentId > 0) {
+        for (int row = 0; row < table_->rowCount(); ++row) {
+            if (!table_->isRowHidden(row) &&
+                table_->item(row, 0)->data(Qt::UserRole + 1).toLongLong() == selectedDocumentId) {
+                table_->selectRow(row);
+                selectionRestored = true;
+                break;
+            }
+        }
+    }
+    if (!selectionRestored && currentBatchId_ > 0)
         selectBatch(currentBatchId_);
     else
         updateActions();
     LayoutUtils::fitTableColumns(table_);
     return Result<bool>::success(true);
+}
+
+void LogisticsPage::applySourceFilter()
+{
+    if (!sourceFilter_)
+        return;
+    const QSignalBlocker blocker(table_);
+    const EntityId sourceId = sourceFilter_->currentData().toLongLong();
+    for (int row = 0; row < table_->rowCount(); ++row)
+        table_->setRowHidden(row, sourceId > 0 &&
+            table_->item(row, 4)->data(Qt::UserRole).toLongLong() != sourceId);
+    if (table_->currentRow() >= 0 && table_->isRowHidden(table_->currentRow())) {
+        table_->clearSelection();
+        table_->setCurrentCell(-1, -1);
+    }
+    updateActions();
 }
 
 void LogisticsPage::setCurrentBatch(EntityId batchId)
@@ -137,17 +245,17 @@ EntityId LogisticsPage::currentBatchId() const { return currentBatchId_; }
 Result<bool> LogisticsPage::selectBatch(EntityId batchId)
 {
     int selectedRow = -1;
-    for (int row = 0; row < table_->rowCount(); ++row) {
-        if (!table_->item(row, 0)->data(Qt::UserRole + 2).toList()
+    // 批次联动回传时，保留用户选中的可见出库单据。
+    if (type_ == DocumentType::Outbound && selectedId() > 0 &&
+        table_->item(table_->currentRow(), 0)->data(Qt::UserRole + 2).toList()
+            .contains(QVariant::fromValue(batchId)))
+        selectedRow = table_->currentRow();
+    for (int row = 0; selectedRow < 0 && row < table_->rowCount(); ++row) {
+        if (table_->isRowHidden(row) || !table_->item(row, 0)->data(Qt::UserRole + 2).toList()
                  .contains(QVariant::fromValue(batchId)))
             continue;
-        if (selectedRow < 0)
-            selectedRow = row;
-        const auto status = table_->item(row, 0)->data(Qt::UserRole).value<DocumentStatus>();
-        if (status == DocumentStatus::Draft) {
-            selectedRow = row;
-            break;
-        }
+        selectedRow = row;
+        break;
     }
     const QSignalBlocker blocker(table_);
     if (selectedRow >= 0)
@@ -181,16 +289,16 @@ ServiceError LogisticsPage::lastError() const { return lastError_; }
 EntityId LogisticsPage::selectedId() const
 {
     const int row = table_->currentRow();
-    return row < 0 ? 0 : table_->item(row, 0)->data(Qt::UserRole + 1).toLongLong();
+    return row < 0 || table_->isRowHidden(row)
+        ? 0 : table_->item(row, 0)->data(Qt::UserRole + 1).toLongLong();
 }
 void LogisticsPage::updateActions()
 {
-    const int row = table_->currentRow(); const bool selected = row >= 0;
-    const auto status = selected ? table_->item(row, 0)->data(Qt::UserRole).value<DocumentStatus>() : DocumentStatus::Draft;
-    edit_->setEnabled(selected && status == DocumentStatus::Draft); remove_->setEnabled(selected && status == DocumentStatus::Draft);
-    confirm_->setEnabled(selected && status == DocumentStatus::Draft);
-    view_->setEnabled(selected && status != DocumentStatus::Draft); cancel_->setEnabled(selected && status == DocumentStatus::Confirmed);
-    copy_->setEnabled(selected && status == DocumentStatus::Cancelled);
+    const int row = table_->currentRow(); const bool selected = selectedId() > 0;
+    edit_->setEnabled(selected);
+    view_->setEnabled(selected);
+    cancel_->setEnabled(selected && table_->item(row, 0)->data(Qt::UserRole).value<DocumentStatus>()
+                                       == DocumentStatus::Confirmed);
 }
 void LogisticsPage::setConfirmationCallback(std::function<bool(const QString &)> callback) { confirmation_ = std::move(callback); }
 bool LogisticsPage::confirmAction(const QString &text) const { return confirmation_ ? confirmation_(text) : QMessageBox::question(const_cast<LogisticsPage *>(this), QStringLiteral("确认"), text) == QMessageBox::Yes; }
@@ -248,7 +356,15 @@ void LogisticsPage::viewSelected()
     emit viewRequested(selectedId());
     openViewDialog(selectedId());
 }
-void LogisticsPage::deleteSelected() { if (selectedId() && confirmAction(QStringLiteral("确定删除草稿？"))) { const auto r = service_.deleteDraft(selectedId()); if (!r.ok()) setError(r.error()); else { setError(); emit dataChanged(); } } }
-void LogisticsPage::confirmSelected() { if (selectedId() && confirmAction(QStringLiteral("确定确认单据？"))) { const auto r = service_.confirm(selectedId()); if (!r.ok()) setError(r.error()); else { setError(); emit dataChanged(); } } }
-void LogisticsPage::cancelSelected() { if (selectedId() && confirmAction(QStringLiteral("确定取消已确认单据？"))) { const auto r = service_.cancel(selectedId()); if (!r.ok()) setError(r.error()); else { setError(); emit dataChanged(); } } }
-void LogisticsPage::copySelected() { if (selectedId()) { const auto r = service_.copyToDraft(selectedId()); if (!r.ok()) setError(r.error()); else { setError(); emit dataChanged(); } } }
+void LogisticsPage::cancelSelected()
+{
+    if (!selectedId() || !confirmAction(QStringLiteral("确定作废此记录并撤销其库存影响？之后仍可编辑恢复。")))
+        return;
+    const auto result = service_.cancel(selectedId());
+    if (!result.ok())
+        setError(result.error());
+    else {
+        setError();
+        emit dataChanged();
+    }
+}

@@ -23,7 +23,6 @@ enum class WorkflowAction {
     GoToMasterData,
     EditInbound,
     CreateTransfer,
-    ConfirmTransfer,
     CreateOutbound,
     CreateReturn,
     ViewTracking
@@ -34,7 +33,7 @@ struct WorkflowBatchOption {
     QString batchNo;
     QString productTypeName;
     qint64 currentQuantity = 0;
-    DocumentStatus status = DocumentStatus::Draft;
+    DocumentStatus status = DocumentStatus::Confirmed;
     QString materialModel;
 };
 
