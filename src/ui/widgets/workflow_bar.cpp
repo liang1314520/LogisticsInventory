@@ -42,6 +42,7 @@ WorkflowBar::WorkflowBar(BatchWorkflowService &service, QWidget *parent)
     auto *header = new QHBoxLayout;
     selector_ = new QComboBox(this);
     selector_->setObjectName(QStringLiteral("workflowBatchSelector"));
+    selector_->addItem(QStringLiteral("全部批次"), EntityId(0));
     selector_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     selector_->setMinimumContentsLength(1);
     selector_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -83,9 +84,9 @@ WorkflowBar::WorkflowBar(BatchWorkflowService &service, QWidget *parent)
     actions->addStretch();
     layout->addLayout(actions);
 
-    connect(selector_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+    connect(selector_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
         const EntityId id = selector_->currentData().toLongLong();
-        if (id > 0 && id != batchId_) {
+        if (index >= 0 && id != batchId_) {
             batchId_ = id;
             if (loadCurrent().ok())
                 emit batchChanged(batchId_);
@@ -114,6 +115,7 @@ Result<bool> WorkflowBar::refresh()
     {
         const QSignalBlocker blocker(selector_);
         selector_->clear();
+        selector_->addItem(QStringLiteral("全部批次"), EntityId(0));
         for (const auto &option : options.value()) {
             selector_->addItem(QStringLiteral("%1 / %2 / 物料型号：%3 / 账面库存 %4")
                                    .arg(option.batchNo, option.productTypeName,
@@ -125,7 +127,7 @@ Result<bool> WorkflowBar::refresh()
                                    selector_->itemText(selector_->count() - 1), Qt::ToolTipRole);
         }
         const int index = selector_->findData(selected);
-        selector_->setCurrentIndex(index >= 0 ? index : selector_->count() > 0 ? 0 : -1);
+        selector_->setCurrentIndex(index >= 0 ? index : 0);
         batchId_ = selector_->currentData().toLongLong();
     }
     const auto loaded = loadCurrent();
@@ -138,7 +140,7 @@ Result<bool> WorkflowBar::setBatch(EntityId batchId)
 {
     if (batchId <= 0) {
         const QSignalBlocker blocker(selector_);
-        selector_->setCurrentIndex(-1);
+        selector_->setCurrentIndex(selector_->findData(EntityId(0)));
         batchId_ = 0;
         clearState();
         return Result<bool>::success(true);
@@ -242,7 +244,9 @@ void WorkflowBar::clearState()
     selector_->setToolTip(selector_->currentText());
     status_->clear();
     status_->setStyleSheet({});
-    message_->clear();
+    message_->setText(selector_->count() > 1
+        ? QStringLiteral("当前显示全部批次；选择具体批次可查看流程和追踪")
+        : QStringLiteral("暂无批次，请先新建入库记录"));
     message_->setStyleSheet({});
     steps_->setRowCount(0);
     next_->setEnabled(false);

@@ -46,7 +46,7 @@ private slots:
     void cancelSelected();
 
 private:
-    void applySourceFilter();
+    void applyFilters();
     EntityId selectedId() const;
     WorkflowAction actionForType() const;
     bool confirmAction(const QString &text) const;

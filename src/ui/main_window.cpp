@@ -176,7 +176,8 @@ MainWindow::MainWindow(MasterDataService &masterData, InventoryQueryService &que
     qApp->installEventFilter(this);
     updateFontMetrics();
     navigation_->setCurrentRow(0);
-    workflowBar_->refresh();
+    if (workflowBar_->refresh().ok())
+        refreshWorkflowContext();
     resize(1100, 760);
     const QByteArray savedSplitter = settings.value(QStringLiteral("ui/workflowSplitter")).toByteArray();
     const bool expanded = settings.value(QStringLiteral("ui/workflowExpanded"), true).toBool();
@@ -303,8 +304,9 @@ void MainWindow::refreshWorkflowContext()
     if (currentBatchId_ <= 0) {
         const QString message = QStringLiteral("前置：准备基础资料\n当前操作：新建入库或选择已有批次");
         inbound_->setWorkflowMessage(message);
-        for (auto *page : {transfer_, outbound_, returns_})
-            page->setWorkflowMessage(message);
+        returns_->setWorkflowMessage(message);
+        for (auto *page : {transfer_, outbound_})
+            page->setWorkflowMessage(QStringLiteral("当前范围：全部批次（出库仍按来源条件筛选）\n当前操作：查看单据；新建时可手动选择明细批次"));
         return;
     }
     const auto state = workflowService_.state(currentBatchId_);

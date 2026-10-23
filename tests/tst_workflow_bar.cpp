@@ -143,7 +143,7 @@ void WorkflowBarTest::clearsStateWhenNoBatchExists()
     auto *status = bar.findChild<QLabel *>(QStringLiteral("workflowStatusLabel"));
     auto *next = bar.findChild<QPushButton *>(QStringLiteral("workflowNextButton"));
     QVERIFY(selector && status && next);
-    QCOMPARE(selector->count(), 0);
+    QCOMPARE(selector->count(), 1);
     QVERIFY(status->text().isEmpty());
     QVERIFY(!next->isEnabled());
     QCOMPARE(bar.currentBatchId(), EntityId(0));
