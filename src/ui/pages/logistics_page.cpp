@@ -17,13 +17,55 @@
 #include <QPushButton>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QStringView>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
 #include <QTableWidget>
+#include <QTextBoundaryFinder>
 #include <QVariant>
 #include <QVBoxLayout>
 
 #include <utility>
 
 namespace {
+class LogisticsItemDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+protected:
+    void initStyleOption(QStyleOptionViewItem *option,
+                         const QModelIndex &index) const override
+    {
+        QStyledItemDelegate::initStyleOption(option, index);
+        option->features.setFlag(QStyleOptionViewItem::WrapText, index.column() == 8);
+        if (index.column() != 8)
+            return;
+
+        const QString text = option->text;
+        QTextBoundaryFinder boundaries(QTextBoundaryFinder::Grapheme, text);
+        QString wrapped;
+        qsizetype start = 0;
+        int count = 0;
+        for (qsizetype end = boundaries.toNextBoundary(); end >= 0;
+             end = boundaries.toNextBoundary()) {
+            const QChar first = text.at(start);
+            if (first == QChar::LineSeparator || first == QChar::ParagraphSeparator ||
+                first == QLatin1Char('\n') || first == QLatin1Char('\r')) {
+                count = 0;
+            } else {
+                if (count == 35) {
+                    wrapped += QChar::LineSeparator;
+                    count = 0;
+                }
+                ++count;
+            }
+            wrapped += QStringView(text).mid(start, end - start);
+            start = end;
+        }
+        option->text = wrapped;
+    }
+};
+
 class BusinessDateItem final : public QTableWidgetItem {
 public:
     BusinessDateItem(const QString &text, const QDateTime &value)
@@ -75,6 +117,7 @@ LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryServic
         headers.append(type_ == DocumentType::Transfer ? QStringLiteral("调拨型号")
                                                        : QStringLiteral("出库型号"));
         headers.append(QStringLiteral("数量"));
+        headers.append(QStringLiteral("备注"));
     }
     layout->addLayout(actions);
     if (type_ == DocumentType::Outbound) {
@@ -95,8 +138,14 @@ LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryServic
     table_->setSelectionBehavior(QAbstractItemView::SelectRows); table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     if (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound) {
-        table_->setWordWrap(false);
+        table_->setItemDelegate(new LogisticsItemDelegate(table_));
+        table_->setWordWrap(true);
         table_->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        connect(table_->horizontalHeader(), &QHeaderView::sectionResized, table_,
+                [this](int column, int, int) {
+                    if (column == 8)
+                        table_->resizeRowsToContents();
+                });
     }
     if (type_ == DocumentType::Outbound) {
         auto *header = table_->horizontalHeader();
@@ -183,6 +232,7 @@ Result<bool> LogisticsPage::refresh()
         if (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound) {
             cells.append(models.join(QLatin1Char('\n')));
             cells.append(quantities.join(QLatin1Char('\n')));
+            cells.append(document.note);
         }
         for (int column = 0; column < cells.size(); ++column) {
             QTableWidgetItem *item;
