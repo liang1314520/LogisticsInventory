@@ -71,6 +71,11 @@ LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryServic
         headers.append(QStringLiteral("接收工厂"));
     else if (type_ == DocumentType::Outbound)
         headers.append(QStringLiteral("出库确认人"));
+    if (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound) {
+        headers.append(type_ == DocumentType::Transfer ? QStringLiteral("调拨型号")
+                                                       : QStringLiteral("出库型号"));
+        headers.append(QStringLiteral("数量"));
+    }
     layout->addLayout(actions);
     if (type_ == DocumentType::Outbound) {
         auto *filters = new QHBoxLayout;
@@ -89,6 +94,10 @@ LogisticsPage::LogisticsPage(MasterDataService &masterData, InventoryQueryServic
     table_->setHorizontalHeaderLabels(headers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows); table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    if (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound) {
+        table_->setWordWrap(false);
+        table_->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    }
     if (type_ == DocumentType::Outbound) {
         auto *header = table_->horizontalHeader();
         header->setSectionsClickable(true);
@@ -160,6 +169,17 @@ Result<bool> LogisticsPage::refresh()
         else if (type_ == DocumentType::Outbound)
             cells.append(document.outboundConfirmedByName.isEmpty()
                 ? QStringLiteral("未填写") : document.outboundConfirmedByName);
+        if (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound) {
+            QStringList models;
+            QStringList quantities;
+            for (const auto &line : document.lines) {
+                models.append(line.modelCodeSnapshot.isEmpty()
+                    ? QStringLiteral("未细分 / 原材料") : line.modelCodeSnapshot);
+                quantities.append(QString::number(line.quantity));
+            }
+            cells.append(models.join(QLatin1Char('\n')));
+            cells.append(quantities.join(QLatin1Char('\n')));
+        }
         for (int column = 0; column < cells.size(); ++column) {
             QTableWidgetItem *item;
             if (column == 0) {
@@ -170,6 +190,8 @@ Result<bool> LogisticsPage::refresh()
             } else {
                 item = new QTableWidgetItem(cells.at(column));
             }
+            if (column >= 6)
+                item->setTextAlignment(Qt::AlignLeft | Qt::AlignTop);
             table_->setItem(row, column, item);
         }
         table_->item(row, 4)->setData(Qt::UserRole, document.sourceLocationId);

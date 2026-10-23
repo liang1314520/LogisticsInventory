@@ -61,6 +61,7 @@ private:
     LogisticsService &service_;
     DocumentType type_;
     EntityId id_ = 0;
+    EntityId preferredBatchId_ = 0;
     bool readOnly_ = false;
     QString originalNumber_;
     QVector<BatchChoice> batches_;

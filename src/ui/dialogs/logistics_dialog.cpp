@@ -235,6 +235,9 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
 {
     id_ = id;
     readOnly_ = readOnly;
+    preferredBatchId_ = !id && !readOnly &&
+        (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound)
+        ? preferredBatchId : 0;
     original_ = {};
     if (outboundConfirmedBy_) {
         outboundConfirmedBy_->clear();
@@ -331,16 +334,18 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
             const auto sourceResult = setSourceLocation(sourceId);
             if (!sourceResult.ok())
                 return sourceResult;
-            if (preferredBatchId > 0 && std::any_of(
+            if (preferredBatchId_ > 0 || (preferredBatchId > 0 && std::any_of(
                     batches_.cbegin(), batches_.cend(), [preferredBatchId](const BatchChoice &choice) {
                         return choice.id == preferredBatchId;
-                    })) {
+                    }))) {
                 const auto line = addLine();
                 if (!line.ok())
                     return line;
-                const auto selected = setLineBatch(0, preferredBatchId);
-                if (!selected.ok())
-                    return selected;
+                if (preferredBatchId_ == 0) {
+                    const auto selected = setLineBatch(0, preferredBatchId);
+                    if (!selected.ok())
+                        return selected;
+                }
             }
         }
     }
@@ -488,7 +493,18 @@ QVector<EntityId> LogisticsDialog::visibleBatchIds() const
 
 Result<bool> LogisticsDialog::addLine()
 {
-    const auto result = populateLine(lines_->rowCount(), {});
+    LogisticsLineInput line;
+    if (preferredBatchId_ > 0) {
+        const bool available = std::any_of(batches_.cbegin(), batches_.cend(),
+            [this](const BatchChoice &choice) { return choice.id == preferredBatchId_; });
+        if (!available)
+            return Result<bool>::failure({QStringLiteral("not_found"),
+                QStringLiteral("当前批次不可用，请重新选择批次"), QStringLiteral("lines")});
+        line.batchId = preferredBatchId_;
+        line.quantity = 1;
+        line.productModelId = -1;
+    }
+    const auto result = populateLine(lines_->rowCount(), line);
     updateContentSize();
     return result;
 }
