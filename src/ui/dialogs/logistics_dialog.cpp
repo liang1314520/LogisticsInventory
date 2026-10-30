@@ -1,5 +1,6 @@
 #include "logistics_dialog.h"
 
+#include "core/packaging.h"
 #include "services/inventory_query_service.h"
 #include "services/logistics_service.h"
 #include "services/master_data_service.h"
@@ -12,6 +13,7 @@
 #include <QEvent>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -25,6 +27,11 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+
+namespace {
+constexpr int unitsPerBoxRole = Qt::UserRole + 1;
+constexpr int boxesPerCartonRole = Qt::UserRole + 2;
+}
 
 LogisticsDialog::LogisticsDialog(MasterDataService &masterData, InventoryQueryService &queries,
                                  LogisticsService &service, DocumentType type, QWidget *parent)
@@ -87,13 +94,31 @@ LogisticsDialog::LogisticsDialog(MasterDataService &masterData, InventoryQuerySe
         layout->addWidget(hint);
     }
 
-    lines_ = new QTableWidget(0, 3, this);
+    const bool packaging = type_ != DocumentType::Return;
+    lines_ = new QTableWidget(0, packaging ? 6 : 3, this);
     lines_->setObjectName(QStringLiteral("lines"));
     lines_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    lines_->setHorizontalHeaderLabels({QStringLiteral("批次"), QStringLiteral("数量"),
+    QStringList headers{QStringLiteral("批次"),
+        packaging ? QStringLiteral("散个数") : QStringLiteral("数量"),
         type_ == DocumentType::Transfer ? QStringLiteral("调拨型号")
-            : type_ == DocumentType::Outbound ? QStringLiteral("出库型号") : QStringLiteral("退回型号")});
+            : type_ == DocumentType::Outbound ? QStringLiteral("出库型号") : QStringLiteral("退回型号")};
+    if (packaging)
+        headers.append({QStringLiteral("箱数"), QStringLiteral("盒数"), QStringLiteral("总个数")});
+    lines_->setHorizontalHeaderLabels(headers);
+    if (packaging) {
+        auto *header = lines_->horizontalHeader();
+        header->moveSection(header->visualIndex(2), 1);
+        header->moveSection(header->visualIndex(3), 2);
+        header->moveSection(header->visualIndex(4), 3);
+    }
     layout->addWidget(lines_);
+    if (packaging) {
+        auto *hint = new QLabel(QStringLiteral(
+            "同一行可填写箱数＋盒数＋散个数，库存按总个数记账。包装规格在基础资料的调拨/出库型号中设置；"
+            "悬停数量可查看换算规格。未设置规格时仅填写散个数。"), this);
+        hint->setWordWrap(true);
+        layout->addWidget(hint);
+    }
 
     auto *lineActions = new QHBoxLayout;
     add_ = new QPushButton(QStringLiteral("添加明细"), this);
@@ -136,6 +161,74 @@ LogisticsDialog::LogisticsDialog(MasterDataService &masterData, InventoryQuerySe
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(documentNo_, &QLineEdit::textEdited, this, &LogisticsDialog::updateContentSize);
     connect(destination_, &QComboBox::activated, this, &LogisticsDialog::updateContentSize);
+}
+
+PackagingSpec LogisticsDialog::linePackagingSpec(int row) const
+{
+    auto *batch = qobject_cast<QComboBox *>(lines_->cellWidget(row, 0));
+    auto *models = qobject_cast<QComboBox *>(lines_->cellWidget(row, 2));
+    const EntityId batchId = batch->currentData().toLongLong();
+    const EntityId modelId = models->currentData().toLongLong();
+    for (const auto &line : original_.lines) {
+        if (line.batchId == batchId && line.productModelId == modelId && line.packaging)
+            return line.packagingSpec;
+    }
+    return {models->currentData(unitsPerBoxRole).toLongLong(),
+            models->currentData(boxesPerCartonRole).toLongLong()};
+}
+
+Result<PackagingQuantities> LogisticsDialog::lineQuantities(int row) const
+{
+    const auto read = [this, row](int column, const QString &field) {
+        auto *edit = qobject_cast<QLineEdit *>(lines_->cellWidget(row, column));
+        if (edit->text().isEmpty())
+            return Result<qint64>::success(0);
+        bool ok = false;
+        const qint64 value = edit->text().toLongLong(&ok);
+        if (!ok || !edit->hasAcceptableInput())
+            return Result<qint64>::failure({QStringLiteral("invalid_quantity"),
+                QStringLiteral("数量必须为范围内的非负整数"),
+                QStringLiteral("lines[%1].%2").arg(row).arg(field)});
+        return Result<qint64>::success(value);
+    };
+    const auto loose = read(1, type_ == DocumentType::Return ? QStringLiteral("quantity")
+                                                           : QStringLiteral("looseQuantity"));
+    if (!loose.ok()) return Result<PackagingQuantities>::failure(loose.error());
+    PackagingQuantities quantities{0, 0, loose.value()};
+    if (type_ != DocumentType::Return) {
+        const auto cartons = read(3, QStringLiteral("cartonCount"));
+        if (!cartons.ok()) return Result<PackagingQuantities>::failure(cartons.error());
+        const auto boxes = read(4, QStringLiteral("boxCount"));
+        if (!boxes.ok()) return Result<PackagingQuantities>::failure(boxes.error());
+        quantities.cartonCount = cartons.value();
+        quantities.boxCount = boxes.value();
+    }
+    return Result<PackagingQuantities>::success(quantities);
+}
+
+void LogisticsDialog::updateLineQuantity(int row)
+{
+    if (type_ == DocumentType::Return)
+        return;
+    const PackagingSpec spec = linePackagingSpec(row);
+    auto *total = qobject_cast<QLineEdit *>(lines_->cellWidget(row, 5));
+    const auto quantities = lineQuantities(row);
+    const auto quantity = quantities.ok()
+        ? calculatePackagingQuantity(quantities.value(), spec)
+        : Result<qint64>::failure(quantities.error());
+    total->setText(quantity.ok() ? QString::number(quantity.value()) : QStringLiteral("数量无效"));
+    QString hint;
+    if (!quantity.ok()) {
+        hint = quantity.error().message;
+    } else if (spec.unitsPerBox > 0) {
+        hint = QStringLiteral("1盒＝%1个；1箱＝%2盒＝%3个；原单使用保存时的规格")
+            .arg(spec.unitsPerBox).arg(spec.boxesPerCarton)
+            .arg(calculatePackagingQuantity({1, 0, 0}, spec).value());
+    } else {
+        hint = QStringLiteral("未设置包装规格，只能按个填写");
+    }
+    for (int column : {1, 3, 4, 5})
+        lines_->cellWidget(row, column)->setToolTip(hint);
 }
 
 void LogisticsDialog::updateContentSize()
@@ -365,7 +458,10 @@ Result<bool> LogisticsDialog::initialize(EntityId id, bool readOnly, EntityId pr
     for (int row = 0; row < lines_->rowCount(); ++row) {
         for (int column : {0, 2})
             lines_->cellWidget(row, column)->setEnabled(!readOnly_);
-        qobject_cast<QLineEdit *>(lines_->cellWidget(row, 1))->setReadOnly(readOnly_);
+        for (int column : {1, 3, 4}) {
+            if (column < lines_->columnCount())
+                qobject_cast<QLineEdit *>(lines_->cellWidget(row, column))->setReadOnly(readOnly_);
+        }
     }
     save_->setVisible(!readOnly_);
     saveHint_->setVisible(!readOnly_);
@@ -446,13 +542,26 @@ Result<bool> LogisticsDialog::populateModels(int row, EntityId modelId,
     if (!models) {
         models = new QComboBox(lines_);
         lines_->setCellWidget(row, 2, models);
-        connect(models, &QComboBox::currentIndexChanged, this, &LogisticsDialog::updateContentSize);
+        connect(models, &QComboBox::currentIndexChanged, this, [this, models] {
+            for (int currentRow = 0; currentRow < lines_->rowCount(); ++currentRow) {
+                if (lines_->cellWidget(currentRow, 2) != models) continue;
+                updateLineQuantity(currentRow);
+                updateContentSize();
+                break;
+            }
+        });
     }
     const QSignalBlocker blocker(models);
     models->clear();
+    const auto appendModel = [models](const QString &text, EntityId id, const PackagingSpec &spec) {
+        models->addItem(text, id);
+        models->setItemData(models->count() - 1, spec.unitsPerBox, unitsPerBoxRole);
+        models->setItemData(models->count() - 1, spec.boxesPerCarton, boxesPerCartonRole);
+    };
     if (readOnly_ && persistedLine) {
-        models->addItem(persistedLine->modelCodeSnapshot.isEmpty()
-            ? QStringLiteral("未细分") : persistedLine->modelCodeSnapshot, modelId);
+        appendModel(persistedLine->modelCodeSnapshot.isEmpty()
+            ? QStringLiteral("未细分") : persistedLine->modelCodeSnapshot,
+            modelId, persistedLine->packagingSpec);
         return Result<bool>::success(true);
     }
     const EntityId batchId = batch->currentData().toLongLong();
@@ -464,13 +573,19 @@ Result<bool> LogisticsDialog::populateModels(int row, EntityId modelId,
         const auto choices = masterData_.enabledProductModelsForTypeResult(typeId);
         if (!choices.ok()) return Result<bool>::failure(choices.error());
         for (const auto &choice : choices.value())
-            models->addItem(choice.modelCode, choice.id);
+            appendModel(choice.modelCode, choice.id, choice.packagingSpec);
     }
     models->addItem(QStringLiteral("未细分 / 原材料"), EntityId(0));
     for (const auto &line : original_.lines) {
         if (line.batchId != batchId || models->findData(line.productModelId) >= 0)
             continue;
-        models->addItem(line.modelCodeSnapshot + QStringLiteral("（原记录型号）"), line.productModelId);
+        PackagingSpec spec = line.packagingSpec;
+        if (!line.packaging && line.productModelId > 0) {
+            const auto historical = masterData_.productModelById(line.productModelId);
+            if (!historical.ok()) return Result<bool>::failure(historical.error());
+            spec = historical.value().packagingSpec;
+        }
+        appendModel(line.modelCodeSnapshot + QStringLiteral("（原记录型号）"), line.productModelId, spec);
     }
     const int selected = models->findData(modelId);
     if (modelId >= 0) {
@@ -504,7 +619,12 @@ Result<bool> LogisticsDialog::addLine()
         line.quantity = 1;
         line.productModelId = -1;
     }
-    const auto result = populateLine(lines_->rowCount(), line);
+    const int row = lines_->rowCount();
+    const auto result = populateLine(row, line);
+    if (result.ok() && type_ != DocumentType::Return && linePackagingSpec(row).unitsPerBox > 0) {
+        auto *quantity = qobject_cast<QLineEdit *>(lines_->cellWidget(row, 1));
+        quantity->setText(QStringLiteral("0"));
+    }
     updateContentSize();
     return result;
 }
@@ -524,6 +644,7 @@ Result<bool> LogisticsDialog::populateLine(int row, const LogisticsLineInput &li
                 if (lines_->cellWidget(currentRow, 0) != batch) continue;
                 const auto result = populateModels(currentRow);
                 if (!result.ok()) showError(result.error());
+                updateLineQuantity(currentRow);
                 updateContentSize();
                 break;
             }
@@ -547,19 +668,51 @@ Result<bool> LogisticsDialog::populateLine(int row, const LogisticsLineInput &li
         batch->setCurrentIndex(batchIndex);
     batch->blockSignals(false);
 
-    auto *quantity = qobject_cast<QLineEdit *>(lines_->cellWidget(row, 1));
-    if (!quantity) {
-        quantity = new QLineEdit(lines_);
-        quantity->setValidator(new QRegularExpressionValidator(
-            QRegularExpression(QStringLiteral("[1-9][0-9]{0,18}")), quantity));
-        lines_->setCellWidget(row, 1, quantity);
-        connect(quantity, &QLineEdit::textEdited, this, &LogisticsDialog::updateContentSize);
+    for (int column : {1, 3, 4}) {
+        if (type_ == DocumentType::Return && column != 1)
+            continue;
+        auto *quantity = qobject_cast<QLineEdit *>(lines_->cellWidget(row, column));
+        if (!quantity) {
+            quantity = new QLineEdit(lines_);
+            quantity->setObjectName(column == 1 ? QStringLiteral("looseQuantity")
+                : column == 3 ? QStringLiteral("cartonCount") : QStringLiteral("boxCount"));
+            quantity->setValidator(new QRegularExpressionValidator(QRegularExpression(
+                type_ == DocumentType::Return ? QStringLiteral("[1-9][0-9]{0,18}")
+                                               : QStringLiteral("[0-9]{0,19}")), quantity));
+            lines_->setCellWidget(row, column, quantity);
+            connect(quantity, &QLineEdit::textChanged, this, [this, quantity, column] {
+                for (int currentRow = 0; currentRow < lines_->rowCount(); ++currentRow) {
+                    if (lines_->cellWidget(currentRow, column) != quantity) continue;
+                    updateLineQuantity(currentRow);
+                    updateContentSize();
+                    break;
+                }
+            });
+        }
+        const QSignalBlocker blocker(quantity);
+        if (column == 1) {
+            quantity->setText(line.packaging ? QString::number(line.packaging->looseQuantity)
+                : line.quantity > 0 ? QString::number(line.quantity)
+                : line.batchId > 0 ? QStringLiteral("0") : QStringLiteral("1"));
+        } else {
+            const qint64 count = !line.packaging ? 0
+                : column == 3 ? line.packaging->cartonCount : line.packaging->boxCount;
+            quantity->setText(QString::number(count));
+        }
+        quantity->setReadOnly(readOnly_);
     }
-    quantity->setText(line.quantity > 0 ? QString::number(line.quantity)
-                                        : (line.batchId > 0 ? QStringLiteral("0")
-                                                            : QStringLiteral("1")));
+    if (type_ != DocumentType::Return && !lines_->cellWidget(row, 5)) {
+        auto *total = new QLineEdit(lines_);
+        total->setObjectName(QStringLiteral("totalQuantity"));
+        total->setReadOnly(true);
+        lines_->setCellWidget(row, 5, total);
+    }
     const auto models = populateModels(row, line.batchId > 0 ? line.productModelId : -1, persistedLine);
-    if (!models.ok()) showError(models.error());
+    if (!models.ok()) {
+        showError(models.error());
+        return models;
+    }
+    updateLineQuantity(row);
     return models;
 }
 
@@ -616,13 +769,21 @@ LogisticsInput LogisticsDialog::input() const
                          outboundConfirmedBy_ ? outboundConfirmedBy_->currentData().toLongLong() : 0};
     for (int row = 0; row < lines_->rowCount(); ++row) {
         auto *batch = qobject_cast<QComboBox *>(lines_->cellWidget(row, 0));
-        auto *quantity = qobject_cast<QLineEdit *>(lines_->cellWidget(row, 1));
-        bool ok = false;
-        const qint64 amount = quantity ? quantity->text().toLongLong(&ok) : 0;
         auto *models = qobject_cast<QComboBox *>(lines_->cellWidget(row, 2));
-        value.lines.append({batch ? batch->currentData().toLongLong() : 0,
-                            ok ? amount : 0,
-                            models && models->currentIndex() >= 0 ? models->currentData().toLongLong() : -1});
+        const auto quantities = lineQuantities(row);
+        LogisticsLineInput line{batch->currentData().toLongLong(),
+            quantities.ok() ? quantities.value().looseQuantity : -1,
+            models->currentIndex() >= 0 ? models->currentData().toLongLong() : -1};
+        if (type_ != DocumentType::Return && quantities.ok()) {
+            const auto spec = linePackagingSpec(row);
+            if (spec.unitsPerBox != 0 || spec.boxesPerCarton != 0 ||
+                quantities.value().cartonCount != 0 || quantities.value().boxCount != 0) {
+                line.packaging = quantities.value();
+                const auto total = calculatePackagingQuantity(*line.packaging, spec);
+                line.quantity = total.ok() ? total.value() : -1;
+            }
+        }
+        value.lines.append(line);
     }
     return value;
 }
@@ -634,10 +795,27 @@ bool LogisticsDialog::save()
                    QStringLiteral("documentNo")});
         return false;
     }
+    for (int row = 0; row < lines_->rowCount(); ++row) {
+        const auto quantities = lineQuantities(row);
+        if (!quantities.ok()) {
+            showError(quantities.error());
+            return false;
+        }
+        if (type_ != DocumentType::Return) {
+            const auto total = calculatePackagingQuantity(quantities.value(), linePackagingSpec(row));
+            if (!total.ok()) {
+                auto failure = total.error();
+                failure.field = QStringLiteral("lines[%1].%2").arg(row).arg(failure.field);
+                showError(failure);
+                return false;
+            }
+        }
+    }
+    const auto value = input();
     const auto result = id_
-        ? service_.update(id_, input())
+        ? service_.update(id_, value)
         : [&] {
-              const auto created = service_.create(input());
+              const auto created = service_.create(value);
               return created.ok() ? Result<bool>::success(true)
                                   : Result<bool>::failure(created.error());
           }();
@@ -661,13 +839,17 @@ QWidget *LogisticsDialog::controlForField(const QString &field) const
         return businessAt_;
     if (field == QStringLiteral("outboundConfirmedById"))
         return outboundConfirmedBy_;
-    const QRegularExpression lineField(QStringLiteral("^lines\\[(\\d+)\\]\\.(batchId|quantity|productModelId)$"));
+    const QRegularExpression lineField(QStringLiteral(
+        "^lines\\[(\\d+)\\]\\.(batchId|quantity|productModelId|cartonCount|boxCount|looseQuantity|unitsPerBox|boxesPerCarton)$"));
     const auto match = lineField.match(field);
     if (match.hasMatch()) {
         const int row = match.captured(1).toInt();
-        const int column = match.captured(2) == QStringLiteral("batchId") ? 0
-            : match.captured(2) == QStringLiteral("quantity") ? 1 : 2;
-        if (row >= 0 && row < lines_->rowCount())
+        const QString name = match.captured(2);
+        const int column = name == QStringLiteral("batchId") ? 0
+            : name == QStringLiteral("quantity") || name == QStringLiteral("looseQuantity") ? 1
+            : name == QStringLiteral("cartonCount") ? 3
+            : name == QStringLiteral("boxCount") ? 4 : 2;
+        if (row >= 0 && row < lines_->rowCount() && column < lines_->columnCount())
             return lines_->cellWidget(row, column);
     }
     if (field == QStringLiteral("lines"))

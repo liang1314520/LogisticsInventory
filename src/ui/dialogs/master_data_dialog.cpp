@@ -1,5 +1,6 @@
 #include "master_data_dialog.h"
 
+#include "core/packaging.h"
 #include "services/master_data_service.h"
 #include "ui/widgets/layout_utils.h"
 
@@ -11,6 +12,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QShowEvent>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -46,6 +49,24 @@ MasterDataDialog::MasterDataDialog(MasterDataService &service, Entity entity, QW
         form->addRow(model ? QStringLiteral("所属产品") : QStringLiteral("分类"), category_);
         form->addRow(model ? QStringLiteral("调拨/出库型号") : QStringLiteral("产品名称"), code_);
         form->addRow(QStringLiteral("说明"), details_);
+        if (model) {
+            unitsPerBox_ = new QLineEdit(this);
+            unitsPerBox_->setObjectName(QStringLiteral("unitsPerBox"));
+            boxesPerCarton_ = new QLineEdit(this);
+            boxesPerCarton_->setObjectName(QStringLiteral("boxesPerCarton"));
+            for (auto *edit : {unitsPerBox_, boxesPerCarton_}) {
+                edit->setPlaceholderText(QStringLiteral("留空或0表示未设置包装"));
+                edit->setValidator(new QRegularExpressionValidator(
+                    QRegularExpression(QStringLiteral("[0-9]{0,19}")), edit));
+                connect(edit, &QLineEdit::textChanged, this, &MasterDataDialog::updatePackagingHint);
+            }
+            packagingHint_ = new QLabel(this);
+            packagingHint_->setWordWrap(true);
+            form->addRow(QStringLiteral("每盒个数"), unitsPerBox_);
+            form->addRow(QStringLiteral("每箱盒数"), boxesPerCarton_);
+            form->addRow(packagingHint_);
+            packagingHint_->setText(QStringLiteral("未设置包装，仅按个录入。"));
+        }
     } else if (entity_ == Entity::Location) {
         locationType_ = new QComboBox(this);
         locationType_->setObjectName(QStringLiteral("locationType"));
@@ -96,6 +117,43 @@ MasterDataDialog::MasterDataDialog(MasterDataService &service, Entity entity, QW
         if (combo)
             connect(combo, &QComboBox::activated, this, &MasterDataDialog::updateContentSize);
     }
+}
+
+Result<PackagingSpec> MasterDataDialog::packagingSpec() const
+{
+    const auto read = [](QLineEdit *edit, const QString &field) {
+        if (edit->text().isEmpty())
+            return Result<qint64>::success(0);
+        bool ok = false;
+        const qint64 value = edit->text().toLongLong(&ok);
+        if (!ok || !edit->hasAcceptableInput())
+            return Result<qint64>::failure({QStringLiteral("invalid_packaging"),
+                QStringLiteral("包装规格必须为范围内的非负整数"), field});
+        return Result<qint64>::success(value);
+    };
+    const auto units = read(unitsPerBox_, QStringLiteral("unitsPerBox"));
+    if (!units.ok()) return Result<PackagingSpec>::failure(units.error());
+    const auto boxes = read(boxesPerCarton_, QStringLiteral("boxesPerCarton"));
+    if (!boxes.ok()) return Result<PackagingSpec>::failure(boxes.error());
+    const PackagingSpec spec{units.value(), boxes.value()};
+    const auto valid = validatePackagingSpec(spec);
+    return valid.ok() ? Result<PackagingSpec>::success(spec)
+                      : Result<PackagingSpec>::failure(valid.error());
+}
+
+void MasterDataDialog::updatePackagingHint()
+{
+    const auto spec = packagingSpec();
+    if (!spec.ok()) {
+        packagingHint_->setText(spec.error().message);
+    } else if (spec.value().unitsPerBox == 0) {
+        packagingHint_->setText(QStringLiteral("未设置包装，仅按个录入。"));
+    } else {
+        const auto total = calculatePackagingQuantity({1, 0, 0}, spec.value());
+        packagingHint_->setText(QStringLiteral("1箱＝%1盒＝%2个")
+            .arg(spec.value().boxesPerCarton).arg(total.value()));
+    }
+    updateContentSize();
 }
 
 void MasterDataDialog::updateContentSize()
@@ -171,6 +229,8 @@ Result<bool> MasterDataDialog::initialize(EntityId id)
         code_->setText(value.value().modelCode);
         details_->setText(value.value().description);
         category_->setCurrentIndex(category_->findData(value.value().productTypeId));
+        unitsPerBox_->setText(QString::number(value.value().packagingSpec.unitsPerBox));
+        boxesPerCarton_->setText(QString::number(value.value().packagingSpec.boxesPerCarton));
     } else if (entity_ == Entity::Personnel) {
         const auto value = service_.personnelById(id);
         if (!value.ok()) {
@@ -212,11 +272,16 @@ bool MasterDataDialog::save()
         if (!value.ok())
             result = Result<bool>::failure(value.error());
     } else if (entity_ == Entity::ProductModel) {
+        const auto packaging = packagingSpec();
+        if (!packaging.ok()) {
+            showError(packaging.error());
+            return false;
+        }
         const auto value = id_
             ? service_.updateProductModel(id_, category_->currentData().toLongLong(),
-                                          code_->text(), details_->text())
+                                          code_->text(), details_->text(), packaging.value())
             : service_.createProductModel(category_->currentData().toLongLong(),
-                                          code_->text(), details_->text());
+                                          code_->text(), details_->text(), packaging.value());
         if (!value.ok())
             result = Result<bool>::failure(value.error());
     } else if (entity_ == Entity::Personnel) {
@@ -254,6 +319,10 @@ QWidget *MasterDataDialog::controlForField(const QString &field) const
         return locationType_;
     if (field == QStringLiteral("countsAsInventory"))
         return inventory_;
+    if (field == QStringLiteral("unitsPerBox"))
+        return unitsPerBox_;
+    if (field == QStringLiteral("boxesPerCarton"))
+        return boxesPerCarton_;
     return nullptr;
 }
 

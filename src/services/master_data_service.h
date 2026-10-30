@@ -10,7 +10,8 @@ public:
     Result<ProductType> createProductType(EntityId categoryId, const QString &typeCode,
                                           const QString &description);
     Result<ProductModel> createProductModel(EntityId productTypeId, const QString &modelCode,
-                                            const QString &description);
+                                            const QString &description,
+                                            const PackagingSpec &packaging = {});
     Result<Location> createLocation(const QString &name, LocationType type,
                                     bool countsAsInventory);
     Result<ProductCategory> updateCategory(EntityId id, const QString &name);
@@ -19,7 +20,8 @@ public:
                                           const QString &description);
     Result<ProductModel> updateProductModel(EntityId id, EntityId productTypeId,
                                             const QString &modelCode,
-                                            const QString &description);
+                                            const QString &description,
+                                            const PackagingSpec &packaging = {});
     Result<Location> updateLocation(EntityId id, const QString &name, LocationType type,
                                     bool countsAsInventory);
 

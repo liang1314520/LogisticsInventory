@@ -18,6 +18,8 @@ target_link_libraries(logistics_database PUBLIC Qt6::Core Qt6::Sql)
 
 add_library(logistics_master_data
     src/core/models.h
+    src/core/packaging.cpp
+    src/core/packaging.h
     src/core/result.h
     src/repositories/document_repository.cpp
     src/repositories/document_repository.h

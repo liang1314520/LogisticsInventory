@@ -25,6 +25,17 @@ struct ProductType {
     bool enabled = true;
 };
 
+struct PackagingSpec {
+    qint64 unitsPerBox = 0;
+    qint64 boxesPerCarton = 0;
+};
+
+struct PackagingQuantities {
+    qint64 cartonCount = 0;
+    qint64 boxCount = 0;
+    qint64 looseQuantity = 0;
+};
+
 // 调拨/出库型号（如 F25/P25）与入库批次的物料型号（如 V40）独立。
 // 库存仍按批次和库位汇总。
 struct ProductModel {
@@ -33,6 +44,7 @@ struct ProductModel {
     QString modelCode;
     QString description;
     bool enabled = true;
+    PackagingSpec packagingSpec;
 };
 
 struct Location {

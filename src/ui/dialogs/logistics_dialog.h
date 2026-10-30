@@ -39,6 +39,9 @@ protected:
 
 private:
     void updateContentSize();
+    PackagingSpec linePackagingSpec(int row) const;
+    Result<PackagingQuantities> lineQuantities(int row) const;
+    void updateLineQuantity(int row);
     struct BatchChoice {
         EntityId id = 0;
         EntityId productTypeId = 0;

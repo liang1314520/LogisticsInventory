@@ -6,5 +6,6 @@
         <file alias="004_document_number_sequences.sql">004_document_number_sequences.sql</file>
         <file alias="005_inbound_material_model.sql">005_inbound_material_model.sql</file>
         <file alias="006_document_people.sql">006_document_people.sql</file>
+        <file alias="007_packaging_quantities.sql">007_packaging_quantities.sql</file>
     </qresource>
 </RCC>

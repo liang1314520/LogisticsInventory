@@ -1,5 +1,7 @@
 #include "master_data_service.h"
 
+#include "core/packaging.h"
+
 namespace {
 ServiceError required(const QString &field)
 {
@@ -55,8 +57,11 @@ Result<ProductType> MasterDataService::createProductType(
 }
 
 Result<ProductModel> MasterDataService::createProductModel(
-    EntityId productTypeId, const QString &modelCode, const QString &description)
+    EntityId productTypeId, const QString &modelCode, const QString &description,
+    const PackagingSpec &packaging)
 {
+    const auto valid = validatePackagingSpec(packaging);
+    if (!valid.ok()) return forwardError<ProductModel>(valid.error());
     const auto type = repository_.productTypeById(productTypeId);
     if (!type.ok()) return productTypeError<ProductModel>(type.error());
     const QString code = modelCode.trimmed();
@@ -64,7 +69,7 @@ Result<ProductModel> MasterDataService::createProductModel(
     const auto exists = repository_.productModelCodeExists(productTypeId, code);
     if (!exists.ok()) return forwardError<ProductModel>(exists.error());
     if (exists.value()) return Result<ProductModel>::failure(duplicate(QStringLiteral("modelCode")));
-    return repository_.insertProductModel(productTypeId, code, description.trimmed());
+    return repository_.insertProductModel(productTypeId, code, description.trimmed(), packaging);
 }
 
 Result<Location> MasterDataService::createLocation(const QString &name, LocationType type,
@@ -112,8 +117,11 @@ Result<ProductType> MasterDataService::updateProductType(
 }
 
 Result<ProductModel> MasterDataService::updateProductModel(
-    EntityId id, EntityId productTypeId, const QString &modelCode, const QString &description)
+    EntityId id, EntityId productTypeId, const QString &modelCode, const QString &description,
+    const PackagingSpec &packaging)
 {
+    const auto valid = validatePackagingSpec(packaging);
+    if (!valid.ok()) return forwardError<ProductModel>(valid.error());
     const auto current = repository_.productModelById(id);
     if (!current.ok()) return forwardError<ProductModel>(current.error());
     const auto type = repository_.productTypeById(productTypeId);
@@ -123,7 +131,7 @@ Result<ProductModel> MasterDataService::updateProductModel(
     const auto exists = repository_.productModelCodeExists(productTypeId, code, id);
     if (!exists.ok()) return forwardError<ProductModel>(exists.error());
     if (exists.value()) return Result<ProductModel>::failure(duplicate(QStringLiteral("modelCode")));
-    return repository_.updateProductModel(id, productTypeId, code, description.trimmed());
+    return repository_.updateProductModel(id, productTypeId, code, description.trimmed(), packaging);
 }
 
 Result<Location> MasterDataService::updateLocation(

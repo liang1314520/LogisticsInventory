@@ -1,5 +1,9 @@
 #include "logistics_service.h"
 
+#include "core/packaging.h"
+
+#include <algorithm>
+
 #include <QHash>
 #include <QSet>
 
@@ -117,17 +121,13 @@ Result<LogisticsDocument> LogisticsService::prepare(const LogisticsInput &input,
             return fail(QStringLiteral("明细批次无效"), prefix + QStringLiteral("batchId"));
         if (value.productModelId < 0)
             return fail(QStringLiteral("型号无效"), prefix + QStringLiteral("productModelId"));
-        if (value.quantity <= 0)
-            return fail(QStringLiteral("明细数量必须为正整数"), prefix + QStringLiteral("quantity"));
+        if (input.type == DocumentType::Return && value.packaging)
+            return fail(QStringLiteral("退回明细只能按个填写"), prefix + QStringLiteral("quantity"));
         const auto choice = qMakePair(value.batchId, value.productModelId);
         if (choices.contains(choice))
             return Result<LogisticsDocument>::failure(error(QStringLiteral("duplicate_batch"),
                 QStringLiteral("同一批次的同一型号请合并为一行"), prefix + QStringLiteral("batchId")));
         choices.insert(choice);
-        if (value.quantity > std::numeric_limits<qint64>::max() - totals.value(value.batchId))
-            return Result<LogisticsDocument>::failure(error(QStringLiteral("quantity_overflow"),
-                QStringLiteral("同批次数量合计超出范围"), prefix + QStringLiteral("quantity")));
-        totals[value.batchId] += value.quantity;
         const auto batch = documents_.inboundById(value.batchId);
         if (!batch.ok())
             return Result<LogisticsDocument>::failure(error(batch.error().code, batch.error().message,
@@ -161,7 +161,35 @@ Result<LogisticsDocument> LogisticsService::prepare(const LogisticsInput &input,
                 return fail(QStringLiteral("型号已停用或不属于该批次的产品"),
                             prefix + QStringLiteral("productModelId"));
             line.modelCodeSnapshot = model.value().modelCode;
+            if (value.packaging)
+                line.packagingSpec = model.value().packagingSpec;
         }
+        if (value.packaging) {
+            if (current) {
+                const auto original = std::find_if(current->lines.cbegin(), current->lines.cend(),
+                    [&value](const LogisticsLine &saved) {
+                        return saved.batchId == value.batchId &&
+                            saved.productModelId == value.productModelId && saved.packaging.has_value();
+                    });
+                if (original != current->lines.cend())
+                    line.packagingSpec = original->packagingSpec;
+            }
+            const auto quantity = calculatePackagingQuantity(*value.packaging, line.packagingSpec);
+            if (!quantity.ok()) {
+                auto failure = quantity.error();
+                failure.field = prefix + failure.field;
+                return Result<LogisticsDocument>::failure(failure);
+            }
+            line.quantity = quantity.value();
+            if (line.packagingSpec.unitsPerBox == 0 && line.packagingSpec.boxesPerCarton == 0)
+                line.packaging.reset();
+        }
+        if (line.quantity <= 0)
+            return fail(QStringLiteral("明细总个数必须为正整数"), prefix + QStringLiteral("quantity"));
+        if (line.quantity > std::numeric_limits<qint64>::max() - totals.value(value.batchId))
+            return Result<LogisticsDocument>::failure(error(QStringLiteral("quantity_overflow"),
+                QStringLiteral("同批次数量合计超出范围"), prefix + QStringLiteral("quantity")));
+        totals[value.batchId] += line.quantity;
         document.lines.append(line);
     }
     return Result<LogisticsDocument>::success(document);

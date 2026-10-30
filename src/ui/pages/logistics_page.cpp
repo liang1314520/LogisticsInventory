@@ -227,7 +227,18 @@ Result<bool> LogisticsPage::refresh()
             batchIds.append(QVariant::fromValue(line.batchId));
             models.append(line.modelCodeSnapshot.isEmpty()
                 ? QStringLiteral("未细分 / 原材料") : line.modelCodeSnapshot);
-            quantities.append(QString::number(line.quantity));
+            QString quantity = QString::number(line.quantity);
+            if (line.packaging && (line.packaging->cartonCount > 0 || line.packaging->boxCount > 0)) {
+                QStringList parts;
+                if (line.packaging->cartonCount > 0)
+                    parts.append(QStringLiteral("%1箱").arg(line.packaging->cartonCount));
+                if (line.packaging->boxCount > 0)
+                    parts.append(QStringLiteral("%1盒").arg(line.packaging->boxCount));
+                if (line.packaging->looseQuantity > 0)
+                    parts.append(QStringLiteral("%1个").arg(line.packaging->looseQuantity));
+                quantity = QStringLiteral("%1（共%2个）").arg(parts.join(QStringLiteral("＋"))).arg(line.quantity);
+            }
+            quantities.append(quantity);
         }
         if (type_ == DocumentType::Transfer || type_ == DocumentType::Outbound) {
             cells.append(models.join(QLatin1Char('\n')));

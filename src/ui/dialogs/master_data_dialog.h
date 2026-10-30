@@ -26,6 +26,8 @@ protected:
 
 private:
     void updateContentSize();
+    Result<PackagingSpec> packagingSpec() const;
+    void updatePackagingHint();
     void showError(const ServiceError &error);
     QWidget *controlForField(const QString &field) const;
 
@@ -35,6 +37,9 @@ private:
     QLineEdit *name_ = nullptr;
     QLineEdit *code_ = nullptr;
     QLineEdit *details_ = nullptr;
+    QLineEdit *unitsPerBox_ = nullptr;
+    QLineEdit *boxesPerCarton_ = nullptr;
+    QLabel *packagingHint_ = nullptr;
     QComboBox *category_ = nullptr;
     QComboBox *locationType_ = nullptr;
     QCheckBox *inventory_ = nullptr;

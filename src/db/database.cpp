@@ -178,7 +178,8 @@ bool Database::migrate(QString *error)
             QStringLiteral(":/migrations/003_product_models.sql"),
             QStringLiteral(":/migrations/004_document_number_sequences.sql"),
             QStringLiteral(":/migrations/005_inbound_material_model.sql"),
-            QStringLiteral(":/migrations/006_document_people.sql")
+            QStringLiteral(":/migrations/006_document_people.sql"),
+            QStringLiteral(":/migrations/007_packaging_quantities.sql")
         };
         if (current > resources.size()) {
             setError(error, QStringLiteral("Database schema version %1 is newer than supported version %2")

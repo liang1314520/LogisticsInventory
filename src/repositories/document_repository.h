@@ -8,10 +8,13 @@
 #include <QList>
 #include <QVector>
 
+#include <optional>
+
 struct LogisticsLineInput {
     EntityId batchId = 0;
     qint64 quantity = 0;
     EntityId productModelId = 0;
+    std::optional<PackagingQuantities> packaging;
 };
 
 struct LogisticsInput {
@@ -33,6 +36,7 @@ struct LogisticsLine : LogisticsLineInput {
     QString typeCodeSnapshot;
     QString modelCodeSnapshot;
     QString materialModel;
+    PackagingSpec packagingSpec;
 };
 
 struct LogisticsDocument {

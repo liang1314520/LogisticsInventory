@@ -88,7 +88,8 @@ MasterDataPage::MasterDataPage(MasterDataService &service, QWidget *parent)
     tabs_->addTab(locations_, QStringLiteral("库位"));
     productModels_ = makeTable(QStringLiteral("productModelsTable"),
         {QStringLiteral("调拨/出库型号"), QStringLiteral("所属产品"),
-         QStringLiteral("说明"), QStringLiteral("状态")}, tabs_);
+         QStringLiteral("说明"), QStringLiteral("每盒个数"), QStringLiteral("每箱盒数"),
+         QStringLiteral("状态")}, tabs_);
     tabs_->addTab(productModels_, QStringLiteral("调拨/出库型号"));
     personnel_ = makeTable(QStringLiteral("personnelTable"),
         {QStringLiteral("姓名"), QStringLiteral("状态")}, tabs_);
@@ -170,6 +171,10 @@ Result<bool> MasterDataPage::refresh()
         const auto &model = models.value().at(row);
         setRow(productModels_, row, model.id,
                {model.modelCode, typeNames.value(model.productTypeId), model.description,
+                model.packagingSpec.unitsPerBox > 0 ? QString::number(model.packagingSpec.unitsPerBox)
+                                                    : QStringLiteral("未设置"),
+                model.packagingSpec.boxesPerCarton > 0 ? QString::number(model.packagingSpec.boxesPerCarton)
+                                                       : QStringLiteral("未设置"),
                 state(model.enabled)}, model.enabled);
     }
     categories_->setRowCount(categories.value().size());

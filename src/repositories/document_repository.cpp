@@ -106,6 +106,12 @@ LogisticsLine readLogisticsLine(const QSqlQuery &query)
     line.productModelId = query.value(7).toLongLong();
     line.modelCodeSnapshot = query.value(8).toString();
     line.materialModel = query.value(9).toString();
+    const PackagingQuantities packaging{query.value(10).toLongLong(), query.value(11).toLongLong(),
+                                        query.value(12).toLongLong()};
+    line.packagingSpec = {query.value(13).toLongLong(), query.value(14).toLongLong()};
+    if (line.packagingSpec.unitsPerBox != 0 || line.packagingSpec.boxesPerCarton != 0 ||
+        packaging.cartonCount != 0 || packaging.boxCount != 0)
+        line.packaging = packaging;
     return line;
 }
 }
@@ -423,8 +429,9 @@ Result<bool> DocumentRepository::insertLogisticsLines(EntityId documentId,
         QSqlQuery query(database_.connection());
         query.prepare(QStringLiteral(
             "INSERT INTO logistics_document_lines(document_id,batch_id,quantity,product_model_id,"
-            "batch_no_snapshot,category_name_snapshot,type_code_snapshot,model_code_snapshot) "
-            "VALUES(?,?,?,NULLIF(?,0),?,?,?,?)"));
+            "batch_no_snapshot,category_name_snapshot,type_code_snapshot,model_code_snapshot,"
+            "carton_count,box_count,loose_quantity,units_per_box_snapshot,boxes_per_carton_snapshot) "
+            "VALUES(?,?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?)"));
         query.addBindValue(documentId);
         query.addBindValue(line.batchId);
         query.addBindValue(line.quantity);
@@ -433,6 +440,12 @@ Result<bool> DocumentRepository::insertLogisticsLines(EntityId documentId,
         query.addBindValue(line.categoryNameSnapshot);
         query.addBindValue(line.typeCodeSnapshot);
         query.addBindValue(line.modelCodeSnapshot.isNull() ? QStringLiteral("") : line.modelCodeSnapshot);
+        const auto packaging = line.packaging.value_or(PackagingQuantities{0, 0, line.quantity});
+        query.addBindValue(packaging.cartonCount);
+        query.addBindValue(packaging.boxCount);
+        query.addBindValue(packaging.looseQuantity);
+        query.addBindValue(line.packagingSpec.unitsPerBox);
+        query.addBindValue(line.packagingSpec.boxesPerCarton);
         if (!query.exec())
             return Result<bool>::failure(databaseError(query));
     }
@@ -459,7 +472,8 @@ Result<LogisticsDocument> DocumentRepository::logisticsById(EntityId id) const
     lines.prepare(QStringLiteral(
         "SELECT l.id,l.batch_id,l.quantity,b.product_type_id,"
         "l.batch_no_snapshot,l.category_name_snapshot,l.type_code_snapshot,"
-        "l.product_model_id,l.model_code_snapshot,b.material_model "
+        "l.product_model_id,l.model_code_snapshot,b.material_model,"
+        "l.carton_count,l.box_count,l.loose_quantity,l.units_per_box_snapshot,l.boxes_per_carton_snapshot "
         "FROM logistics_document_lines l JOIN inbound_batches b ON b.id=l.batch_id "
         "WHERE l.document_id=? ORDER BY l.id"));
     lines.addBindValue(id);
@@ -511,7 +525,8 @@ Result<QVector<LogisticsDocument>> DocumentRepository::logisticsForBatch(EntityI
         lines.prepare(QStringLiteral(
             "SELECT l.id,l.batch_id,l.quantity,b.product_type_id,"
             "l.batch_no_snapshot,l.category_name_snapshot,l.type_code_snapshot,"
-            "l.product_model_id,l.model_code_snapshot,b.material_model "
+            "l.product_model_id,l.model_code_snapshot,b.material_model,"
+            "l.carton_count,l.box_count,l.loose_quantity,l.units_per_box_snapshot,l.boxes_per_carton_snapshot "
             "FROM logistics_document_lines l JOIN inbound_batches b ON b.id=l.batch_id "
             "WHERE l.document_id=? ORDER BY l.id"));
         lines.addBindValue(document.id);

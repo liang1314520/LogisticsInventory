@@ -49,7 +49,8 @@ ProductType productType(const QSqlQuery &q)
 ProductModel productModel(const QSqlQuery &q)
 {
     return {q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toString(),
-            q.value(3).toString(), q.value(4).toBool()};
+            q.value(3).toString(), q.value(4).toBool(),
+            {q.value(5).toLongLong(), q.value(6).toLongLong()}};
 }
 Location location(const QSqlQuery &q)
 {
@@ -171,14 +172,18 @@ Result<ProductType> MasterDataRepository::insertProductType(
 }
 
 Result<ProductModel> MasterDataRepository::insertProductModel(
-    EntityId productTypeId, const QString &modelCode, const QString &description)
+    EntityId productTypeId, const QString &modelCode, const QString &description,
+    const PackagingSpec &packaging)
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "INSERT INTO product_models(product_type_id,model_code,description) VALUES(?,?,?)"));
+        "INSERT INTO product_models(product_type_id,model_code,description,units_per_box,"
+        "boxes_per_carton) VALUES(?,?,?,?,?)"));
     query.addBindValue(productTypeId);
     query.addBindValue(modelCode);
     query.addBindValue(description.isNull() ? QStringLiteral("") : description);
+    query.addBindValue(packaging.unitsPerBox);
+    query.addBindValue(packaging.boxesPerCarton);
     if (!query.exec()) return failure<ProductModel>(query, QStringLiteral("modelCode"));
     return productModelById(query.lastInsertId().toLongLong());
 }
@@ -221,13 +226,17 @@ Result<ProductType> MasterDataRepository::updateProductType(
 }
 
 Result<ProductModel> MasterDataRepository::updateProductModel(
-    EntityId id, EntityId productTypeId, const QString &modelCode, const QString &description)
+    EntityId id, EntityId productTypeId, const QString &modelCode, const QString &description,
+    const PackagingSpec &packaging)
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "UPDATE product_models SET product_type_id=?,model_code=?,description=? WHERE id=?"));
+        "UPDATE product_models SET product_type_id=?,model_code=?,description=?,units_per_box=?,"
+        "boxes_per_carton=? WHERE id=?"));
     query.addBindValue(productTypeId); query.addBindValue(modelCode);
     query.addBindValue(description.isNull() ? QStringLiteral("") : description);
+    query.addBindValue(packaging.unitsPerBox);
+    query.addBindValue(packaging.boxesPerCarton);
     query.addBindValue(id);
     if (!query.exec()) return failure<ProductModel>(query, QStringLiteral("modelCode"));
     if (!query.numRowsAffected()) return missing<ProductModel>();
@@ -272,7 +281,7 @@ Result<ProductModel> MasterDataRepository::productModelById(EntityId id) const
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "SELECT id,product_type_id,model_code,description,enabled FROM product_models WHERE id=?"));
+        "SELECT id,product_type_id,model_code,description,enabled,units_per_box,boxes_per_carton FROM product_models WHERE id=?"));
     query.addBindValue(id);
     if (!query.exec()) return failure<ProductModel>(query);
     if (!query.next()) return missing<ProductModel>();
@@ -317,7 +326,7 @@ Result<QVector<ProductModel>> MasterDataRepository::enabledProductModels() const
 {
     QSqlQuery query(database_.connection());
     if (!query.exec(QStringLiteral(
-            "SELECT m.id,m.product_type_id,m.model_code,m.description,m.enabled "
+            "SELECT m.id,m.product_type_id,m.model_code,m.description,m.enabled,m.units_per_box,m.boxes_per_carton "
             "FROM product_models m JOIN product_types t ON t.id=m.product_type_id "
             "JOIN product_categories c ON c.id=t.category_id "
             "WHERE m.enabled=1 AND t.enabled=1 AND c.enabled=1 "
@@ -334,7 +343,7 @@ Result<QVector<ProductModel>> MasterDataRepository::enabledProductModelsForType(
 {
     QSqlQuery query(database_.connection());
     query.prepare(QStringLiteral(
-        "SELECT m.id,m.product_type_id,m.model_code,m.description,m.enabled "
+        "SELECT m.id,m.product_type_id,m.model_code,m.description,m.enabled,m.units_per_box,m.boxes_per_carton "
         "FROM product_models m JOIN product_types t ON t.id=m.product_type_id "
         "JOIN product_categories c ON c.id=t.category_id "
         "WHERE m.product_type_id=? AND m.enabled=1 AND t.enabled=1 AND c.enabled=1 "
@@ -384,7 +393,7 @@ Result<QVector<ProductModel>> MasterDataRepository::allProductModels() const
 {
     QSqlQuery query(database_.connection());
     if (!query.exec(QStringLiteral(
-            "SELECT id,product_type_id,model_code,description,enabled FROM product_models "
+            "SELECT id,product_type_id,model_code,description,enabled,units_per_box,boxes_per_carton FROM product_models "
             "ORDER BY product_type_id,model_code,id")))
         return failure<QVector<ProductModel>>(query);
     QVector<ProductModel> rows;
